@@ -279,7 +279,7 @@ std::vector<at::Tensor> normalized_peephole_lstm_backward(
 	const auto input_size = weight_ih.size(1);
 	const auto state_size = grad_h.size(1);
 	const auto gate_size = 4 * state_size;
-	/*
+	
 	const bool state_ge_input = (state_size >= input_size);
 	at::Tensor weights;
 	if (state_ge_input)
@@ -311,7 +311,7 @@ std::vector<at::Tensor> normalized_peephole_lstm_backward(
 									   at::cat({ at::stack({ weight_hh,
 															 at::cat({ weight_ch, at::zeros(weight_ch.type(), { state_size, state_size }) }, 0) }, 0),
 												 at::zeros(weight_hh.type(), { 2, gate_size, diff }) }, 2) }, 0);
-	}*/
+	}
 
 	const auto gammas_ihc = at::stack({ gamma_ih, gamma_hh, at::cat({ gamma_ch, at::zeros(gamma_ch.type(), { state_size }) }, 0) }, 0).unsqueeze(1);
 
@@ -334,14 +334,14 @@ std::vector<at::Tensor> normalized_peephole_lstm_backward(
 
 	auto grad_inputs = at::empty(X.type(), { sequence_length, batch_size, input_size });
 	auto d_bnorm_tanh_new_cells = at::empty_like(bnorm_tanh_cells);
-	//auto d_gates_ihc = at::empty(gates.type(), { 3, sequence_length, batch_size, gate_size });
-	auto d_ih_gates = at::empty(X.type(), { sequence_length, batch_size, gate_size });
-	auto d_hh_gates = at::empty(X.type(), { sequence_length, batch_size, gate_size });
-	auto d_ch_gates = at::empty(X.type(), { sequence_length, batch_size, 3 * state_size });
+	auto d_gates_ihc = at::empty(gates.type(), { 3, sequence_length, batch_size, gate_size });
+	//auto d_ih_gates = at::empty(X.type(), { sequence_length, batch_size, gate_size });
+	//auto d_hh_gates = at::empty(X.type(), { sequence_length, batch_size, gate_size });
+	//auto d_ch_gates = at::empty(X.type(), { sequence_length, batch_size, 3 * state_size });
 
 	grad_output *= dropout_output;
 
-	gates = at::cat({ X.slice(2, state_size, 2 * state_size),
+	gates = at::cat({ X[2],
 					  gates.slice(/*dim=*/2, 3 * state_size),
 					  bnorm_tanh_cells,
 					  gates.slice(/*dim=*/2, state_size, 2 * state_size) }, /*dim=*/2)
@@ -356,14 +356,14 @@ std::vector<at::Tensor> normalized_peephole_lstm_backward(
 	at::Tensor d_tanh_new_cell;
 	at::Tensor d_new_cell;
 	at::Tensor d_norm_gate;
-	//at::Tensor d_norm_gate_ihc;
-	at::Tensor d_norm_ih_gate;
-	at::Tensor d_norm_hh_gate;
-	at::Tensor d_norm_ch_gate;
-	//at::Tensor d_gate_ihc;
-	at::Tensor d_ih_gate;
-	at::Tensor d_hh_gate;
-	at::Tensor d_ch_gate;
+	at::Tensor d_norm_gate_ihc;
+	//at::Tensor d_norm_ih_gate;
+	//at::Tensor d_norm_hh_gate;
+	//at::Tensor d_norm_ch_gate;
+	at::Tensor d_gate_ihc;
+	//at::Tensor d_ih_gate;
+	//at::Tensor d_hh_gate;
+	//at::Tensor d_ch_gate;
 	at::Tensor d_X_ihc;
 	for (int i = (sequence_length - 1); i >= 0; i--)
 	{
@@ -383,36 +383,36 @@ std::vector<at::Tensor> normalized_peephole_lstm_backward(
 		d_norm_gate = at::cat({ d_new_cell, d_new_cell, grad_h, d_new_cell }, 1) * gates[i];
 		gates[i] = d_norm_gate;
 
-		//d_norm_gate_ihc = d_norm_gate * gammas_ihc;
-		d_norm_ih_gate = d_norm_gate * gamma_ih;
-		d_norm_hh_gate = d_norm_gate * gamma_hh;
-		d_norm_ch_gate = d_norm_gate.slice(1, 0, 3 * state_size) * gamma_ch;
+		d_norm_gate_ihc = d_norm_gate * gammas_ihc;
+		//d_norm_ih_gate = d_norm_gate * gamma_ih;
+		//d_norm_hh_gate = d_norm_gate * gamma_hh;
+		//d_norm_ch_gate = d_norm_gate.slice(1, 0, 3 * state_size) * gamma_ch;
 
-		//d_gate_ihc = (batch_size * d_norm_gate_ihc
-		//			  - d_norm_gate_ihc.sum(1, true)
-		//			  - norm_ihc.select(1, i) * (d_norm_gate_ihc * norm_ihc.select(1, i)).sum(1, true)) / stds_ihc.select(1, i).unsqueeze(1);
-		//d_gates_ihc.select(1, i) = d_gate_ihc;
-		d_ih_gate = (batch_size * d_norm_ih_gate
-					 - d_norm_ih_gate.sum(0)
-					 = norm_collection[0][i] * (d_norm_ih_gate.mul(norm_collection[0][i]).sum(0))).div(stds_collection[0][i]);
-		d_ih_gates[i] = d_ih_gate;
-		d_hh_gate = (batch_size * d_norm_hh_gate
-					 - d_norm_hh_gate.sum(0)
-					 = norm_collection[1][i] * (d_norm_hh_gate.mul(norm_collection[1][i]).sum(0))).div(stds_collection[1][i]);
-		d_hh_gates[i] = d_hh_gate;
-		d_ch_gate = (batch_size * d_norm_ch_gate
-					 - d_norm_ch_gate.sum(0)
-					 = norm_collection[2][i].slice(1, 0, 3 * state_size) * (d_norm_ch_gate.mul(norm_collection[2][i].slice(1, 0, 3 * state_size)).sum(0))).div(stds_collection[2][i].slice(0, 0, 3 * state_size));
-		d_ch_gates[i] = d_ch_gate;
+		d_gate_ihc = (batch_size * d_norm_gate_ihc
+					  - d_norm_gate_ihc.sum(1, true)
+					  - norm_ihc.select(1, i) * (d_norm_gate_ihc * norm_ihc.select(1, i)).sum(1, true)) / stds_ihc.select(1, i).unsqueeze(1);
+		d_gates_ihc.select(1, i) = d_gate_ihc;
+		//d_ih_gate = (batch_size * d_norm_ih_gate
+		//			 - d_norm_ih_gate.sum(0)
+		//			 = norm_collection[0][i] * (d_norm_ih_gate.mul(norm_collection[0][i]).sum(0))).div(stds_collection[0][i]);
+		//d_ih_gates[i] = d_ih_gate;
+		//d_hh_gate = (batch_size * d_norm_hh_gate
+		//			 - d_norm_hh_gate.sum(0)
+		//			 = norm_collection[1][i] * (d_norm_hh_gate.mul(norm_collection[1][i]).sum(0))).div(stds_collection[1][i]);
+		//d_hh_gates[i] = d_hh_gate;
+		//d_ch_gate = (batch_size * d_norm_ch_gate
+		//			 - d_norm_ch_gate.sum(0)
+		//			 = norm_collection[2][i].slice(1, 0, 3 * state_size) * (d_norm_ch_gate.mul(norm_collection[2][i].slice(1, 0, 3 * state_size)).sum(0))).div(stds_collection[2][i].slice(0, 0, 3 * state_size));
+		//d_ch_gates[i] = d_ch_gate;
 
-		//d_X_ihc = at::matmul(d_gate_ihc, weights);
+		d_X_ihc = at::matmul(d_gate_ihc, weights);
 
-		//grad_inputs[i] = d_X_ihc[0].slice(1, 0, input_size);
-		grad_inputs[i] = at::mm(d_ih_gate, weight_ih);
-		//grad_h = d_X_ihc[1].slice(1, 0, state_size) * dropout_hidden[i];
-		grad_h = at::mm(d_hh_gate, weight_hh) * dropout_hidden[i];
-		//grad_cell = at::addcmul(d_X_ihc[2].slice(1, 0, state_size), d_new_cell, forget_gates[i]);
-		grad_cell = at::addcmul(at::mm(d_ch_gate, weight_ch), d_new_cell, forget_gates[i]);
+		grad_inputs[i] = d_X_ihc[0].slice(1, 0, input_size);
+		//grad_inputs[i] = at::mm(d_ih_gate, weight_ih);
+		grad_h = d_X_ihc[1].slice(1, 0, state_size) * dropout_hidden[i];
+		//grad_h = at::mm(d_hh_gate, weight_hh) * dropout_hidden[i];
+		grad_cell = at::addcmul(d_X_ihc[2].slice(1, 0, state_size), d_new_cell, forget_gates[i]);
+		//grad_cell = at::addcmul(at::mm(d_ch_gate, weight_ch), d_new_cell, forget_gates[i]);
 	}
 	/*
 	AT_ASSERTM(false,
@@ -425,23 +425,23 @@ std::vector<at::Tensor> normalized_peephole_lstm_backward(
 			   norm_ihc.sizes(),
 			   "\n\n\n");
 			   */
-	//const auto grad_weights_ihc = at::matmul(d_gates_ihc.flatten(1, 2).transpose(1, 2), X.flatten(1, 2));
-	//const auto grad_weight_ih = grad_weights_ihc[0].slice(1, 0, input_size);
-	const auto grad_weight_ih = at::matmul(d_ih_gates.flatten(0, 1).t(), X.slice(2, 2 * state_size).flatten(0, 1));
-	//const auto grad_weight_hh = grad_weights_ihc[1].slice(1, 0, state_size);
-	const auto grad_weight_hh = at::matmul(d_hh_gates.flatten(0, 1).t(), X.slice(2, 0, state_size).flatten(0, 1));
-	//const auto grad_weight_ch = grad_weights_ihc[2].slice(0, 0, 3 * state_size).slice(1, 0, state_size);
-	const auto grad_weight_ch = at::matmul(d_ch_gates.flatten(0, 1).t(), X.slice(2, state_size, 2 * state_size).flatten(0, 1));
+	const auto grad_weights_ihc = at::matmul(d_gates_ihc.flatten(1, 2).transpose(1, 2), X.flatten(1, 2));
+	const auto grad_weight_ih = grad_weights_ihc[0].slice(1, 0, input_size);
+	//const auto grad_weight_ih = at::matmul(d_ih_gates.flatten(0, 1).t(), X.slice(2, 2 * state_size).flatten(0, 1));
+	const auto grad_weight_hh = grad_weights_ihc[1].slice(1, 0, state_size);
+	//const auto grad_weight_hh = at::matmul(d_hh_gates.flatten(0, 1).t(), X.slice(2, 0, state_size).flatten(0, 1));
+	const auto grad_weight_ch = grad_weights_ihc[2].slice(0, 0, 3 * state_size).slice(1, 0, state_size);
+	//const auto grad_weight_ch = at::matmul(d_ch_gates.flatten(0, 1).t(), X.slice(2, state_size, 2 * state_size).flatten(0, 1));
 
 	const auto grad_bias = gates.sum({ 0, 1 });
 
-	//const auto grad_gammas_ihc = gates.mul(norm_ihc).sum({ 1, 2 });
-	//const auto grad_gamma_ih = grad_gammas_ihc[0];
-	const auto grad_gamma_ih = gates.mul(norm_collection[0]).sum({ 0, 1 });
-	//const auto grad_gamma_hh = grad_gammas_ihc[1];
-	const auto grad_gamma_hh = gates.mul(norm_collection[1]).sum({ 0, 1 });
-	//const auto grad_gamma_ch = grad_gammas_ihc[2].slice(0, 0, 3 * state_size);
-	const auto grad_gamma_ch = gates.slice(2, 0, 3 * state_size).mul(norm_collection[2].slice(2, 0, 3 * state_size)).sum({ 0, 1 });
+	const auto grad_gammas_ihc = gates.mul(norm_ihc).sum({ 1, 2 });
+	const auto grad_gamma_ih = grad_gammas_ihc[0];
+	//const auto grad_gamma_ih = gates.mul(norm_collection[0]).sum({ 0, 1 });
+	const auto grad_gamma_hh = grad_gammas_ihc[1];
+	//const auto grad_gamma_hh = gates.mul(norm_collection[1]).sum({ 0, 1 });
+	const auto grad_gamma_ch = grad_gammas_ihc[2].slice(0, 0, 3 * state_size);
+	//const auto grad_gamma_ch = gates.slice(2, 0, 3 * state_size).mul(norm_collection[2].slice(2, 0, 3 * state_size)).sum({ 0, 1 });
 	const auto grad_gamma_tanh_cell = d_bnorm_tanh_new_cells.mul(norm_tanh_cells).sum({ 0, 1 });
 
 	const auto grad_beta_tanh_cell = d_bnorm_tanh_new_cells.sum({ 0, 1 });
