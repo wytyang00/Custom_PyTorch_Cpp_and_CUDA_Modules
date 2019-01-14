@@ -91,7 +91,7 @@ std::vector<at::Tensor> normalized_peephole_lstm_forward(
 
 		stds_collection = at::empty(gates.type(), { 3, sequence_length, 4 * state_size });
 
-		mean_and_vars_collection[0] = at::stack({ gates.mean(/*dim=*/1, /*keepdim=*/false), gates.var(/*dim=*/1, /*unbiased=*/false, /*keepdim=*/false) + epsilon }, /*dim=*/0);
+		mean_and_vars_collection[0] = at::stack({ gates.mean(/*dim=*/1, /*keepdim=*/false), gates.var(/*dim=*/1, /*unbiased=*/false, /*keepdim=*/false) }, /*dim=*/0);
 
 		gates -= mean_and_vars_gate_ih[0].unsqueeze(1);
 		std = mean_and_vars_gate_ih[1].add(epsilon).sqrt();

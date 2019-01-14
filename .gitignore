@@ -32,3 +32,5 @@
 *.app
 
 .vs
+Pytorch_Project/pytorch_jupyter.bat
+**/.ipynb_checkpoints
