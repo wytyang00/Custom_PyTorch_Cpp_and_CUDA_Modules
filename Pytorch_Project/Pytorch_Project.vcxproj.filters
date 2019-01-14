@@ -36,6 +36,9 @@
     <ClCompile Include="normalized_lstm.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="layer_norm_lstm_layer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="peephole_lstm_cuda_kernal.cu">

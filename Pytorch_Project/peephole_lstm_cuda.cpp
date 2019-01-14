@@ -52,7 +52,7 @@ std::vector<at::Tensor> peephole_lstm_cpu_forward(
 		tanh_gate = gate_weights.slice(1, 3 * state_size).tanh();
 
 		//cell = cell * sig_gates[0] + tanh_gate * sig_gates[1];
-		at::addcmul_out(cell, tanh_gate * sig_gates[1], cell, sig_gates[0]);
+		cell = at::addcmul(tanh_gate * sig_gates[1], cell, sig_gates[0]);
 		auto tanh_cell = cell.tanh();
 		tanh_new_cells[i] = tanh_cell;
 		hidden = tanh_cell * sig_gates[2];
@@ -95,22 +95,14 @@ std::vector<at::Tensor> peephole_lstm_cpu_backward(
 	const auto forget_gates = gates.slice(2, 0, state_size);
 	const auto output_gates = gates.slice(2, 2 * state_size, 3 * state_size);
 
-	at::mul_out(gates,
-				at::cat({ X.slice(/*dim=*/2, state_size, 2 * state_size),
-					  gates.slice(/*dim=*/2, 3 * state_size),
-					  tanh_new_cells,
-					  gates.slice(/*dim=*/2, state_size, 2 * state_size) }, /*dim=*/2),
-				at::cat({ (gates.slice(/*dim=*/2, 0, 3 * state_size) * (1 - gates.slice(/*dim=*/2, 0, 3 * state_size))),
-					(1 - gates.slice(/*dim=*/2, 3 * state_size).pow(2)) }, /*dim=*/2));
-	//gates = at::cat({ X.slice(/*dim=*/2, state_size, 2 * state_size),
-	//				  gates.slice(/*dim=*/2, 3 * state_size),
-	//				  tanh_new_cells,
-	//				  gates.slice(/*dim=*/2, state_size, 2 * state_size) }, /*dim=*/2)
-	//	* at::cat({ (gates.slice(/*dim=*/2, 0, 3 * state_size) * (1 - gates.slice(/*dim=*/2, 0, 3 * state_size))),
-	//				(1 - gates.slice(/*dim=*/2, 3 * state_size).pow(2)) }, /*dim=*/2);
+	gates = at::mul(at::cat({ X.slice(/*dim=*/2, state_size, 2 * state_size),
+					          gates.slice(/*dim=*/2, 3 * state_size),
+					          tanh_new_cells,
+					          gates.slice(/*dim=*/2, state_size, 2 * state_size) }, /*dim=*/2),
+				    at::cat({ (gates.slice(/*dim=*/2, 0, 3 * state_size) * (1 - gates.slice(/*dim=*/2, 0, 3 * state_size))),
+					          (1 - gates.slice(/*dim=*/2, 3 * state_size).pow(2)) }, /*dim=*/2));
 
-	at::mul_out(tanh_new_cells, 1 - tanh_new_cells, output_gates);
-	//tanh_new_cells = (1 - tanh_new_cells.pow(2)) * output_gates;
+	tanh_new_cells = at::mul(1 - tanh_new_cells.pow(2), output_gates);
 
 	at::Tensor grad_new_cell;
 	at::Tensor grad_X;
@@ -118,20 +110,13 @@ std::vector<at::Tensor> peephole_lstm_cpu_backward(
 	{
 		grad_h += grad_output[i];
 
-		at::addcmul_out(grad_new_cell, grad_cell, tanh_new_cells[i], grad_h);
-		//grad_new_cell = tanh_new_cells[i] * grad_h + grad_cell;
-
-		//grad_cell = forget_gates[i] * grad_new_cell;
+		grad_new_cell = at::addcmul(grad_cell, tanh_new_cells[i], grad_h);
 
 		gates[i] *= at::cat({ grad_new_cell, grad_new_cell, grad_h, grad_new_cell }, /*dim=*/1);
 
-		at::mm_out(grad_X, gates[i], weights);
-		//grad_X = gates[i].mm(weights);
-		at::mul_out(grad_h, grad_X.slice(/*dim=*/1, 0, state_size), dropout[0][i]);
-		//grad_h = grad_X.slice(/*dim=*/1, 0, state_size);
-		//grad_h *= dropout[0][i];
-		at::addcmul_out(grad_cell, grad_X.slice(/*dim=*/1, state_size, 2 * state_size), forget_gates[i], grad_new_cell);
-		//grad_cell += grad_X.slice(/*dim=*/1, state_size, 2 * state_size);
+		grad_X = at::mm(gates[i], weights);
+		grad_h = at::mul(grad_X.slice(/*dim=*/1, 0, state_size), dropout[0][i]);
+		grad_cell = at::addcmul(grad_X.slice(/*dim=*/1, state_size, 2 * state_size), forget_gates[i], grad_new_cell);
 		grad_inputs[i] = grad_X.slice(/*dim=*/1, 2 * state_size);
 	}
 	auto d_weights = at::mm(gates.flatten(0, 1).t(), X.flatten(0, 1));
