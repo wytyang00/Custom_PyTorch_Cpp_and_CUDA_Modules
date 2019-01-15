@@ -34,19 +34,19 @@ std::vector<at::Tensor> normalized_peephole_lstm_forward(
 	const auto input_size = input.size(2);
 	const auto state_size = weight_ih.size(0) / 4;
 
-	at::Tensor output = at::empty(weight_ih.type(), { sequence_length, batch_size, state_size });
+	at::Tensor output = at::zeros(weight_ih.type(), { sequence_length, batch_size, state_size });
 
-	at::Tensor tanh_new_cells = at::empty(cell.type(), { sequence_length, batch_size, state_size });
-	at::Tensor bnorm_tanh_cells = at::empty_like(tanh_new_cells);
+	at::Tensor tanh_new_cells = at::zeros(cell.type(), { sequence_length, batch_size, state_size });
+	at::Tensor bnorm_tanh_cells = at::zeros_like(tanh_new_cells);
 
-	at::Tensor norm_collection = at::empty(input.type(), { 3, sequence_length, batch_size, 4 * state_size });
+	at::Tensor norm_collection = at::zeros(input.type(), { 3, sequence_length, batch_size, 4 * state_size });
 	at::Tensor norm_gates_ih = norm_collection[0];
 	at::Tensor norm_gates_hh = norm_collection[1];
 	at::Tensor norm_gates_ch = norm_collection[2].slice(2, 0, 3 * state_size);
 	at::Tensor norm_tanh_cells = norm_collection[2].slice(2, 3 * state_size);
 
 	at::Tensor gates = at::matmul(input, weight_ih.transpose(0, 1));
-	at::Tensor X = at::empty(weight_ih.type(), { sequence_length, batch_size, (input_size + (2 * state_size)) });
+	at::Tensor X = at::zeros(weight_ih.type(), { sequence_length, batch_size, (input_size + (2 * state_size)) });
 	X.slice(2, 2 * state_size) = input;
 
 	at::Tensor dropout;
@@ -54,7 +54,7 @@ std::vector<at::Tensor> normalized_peephole_lstm_forward(
 	else
 	{
 		if (dropout_p >= 1.) { dropout = at::zeros(output.type(), { 2, sequence_length, batch_size, state_size }); }
-		else { dropout = at::bernoulli(at::empty(output.type(), { 2, sequence_length, batch_size, state_size }), (1 - dropout_p)).div(1 - dropout_p); }
+		else { dropout = at::bernoulli(at::zeros(output.type(), { 2, sequence_length, batch_size, state_size }), (1 - dropout_p)).div(1 - dropout_p); }
 	}
 	auto dropout_hidden = dropout[0];
 	auto dropout_output = dropout[1];
@@ -83,18 +83,20 @@ std::vector<at::Tensor> normalized_peephole_lstm_forward(
 	at::Tensor norm_tanh_cell;
 	if (training)
 	{
-		mean_and_vars_collection = at::empty(gates.type(), { 3, 2, sequence_length, 4 * state_size });
+		const double bias_factor = (double)(batch_size - 1) / (double)(batch_size);
+
+		mean_and_vars_collection = at::zeros(gates.type(), { 3, 2, sequence_length, 4 * state_size });
 		mean_and_vars_gate_ih = mean_and_vars_collection[0];
 		mean_and_vars_gate_hh = mean_and_vars_collection[1];
 		mean_and_vars_gate_ch = mean_and_vars_collection[2].slice(2, 0, 3 * state_size);
 		mean_and_vars_tanh_cell = mean_and_vars_collection[2].slice(2, 3 * state_size);
 
-		stds_collection = at::empty(gates.type(), { 3, sequence_length, 4 * state_size });
+		stds_collection = at::zeros(gates.type(), { 3, sequence_length, 4 * state_size });
 
-		mean_and_vars_collection[0] = at::stack({ gates.mean(/*dim=*/1, /*keepdim=*/false), gates.var(/*dim=*/1, /*unbiased=*/false, /*keepdim=*/false) }, /*dim=*/0);
+		mean_and_vars_collection[0] = at::stack({ gates.mean(/*dim=*/1, /*keepdim=*/false), gates.var(/*dim=*/1, /*unbiased=*/true, /*keepdim=*/false) }, /*dim=*/0);
 
 		gates -= mean_and_vars_gate_ih[0].unsqueeze(1);
-		std = mean_and_vars_gate_ih[1].add(epsilon).sqrt();
+		std = mean_and_vars_gate_ih[1].mul(bias_factor).add(epsilon).sqrt();
 		stds_collection[0] = std;
 		gates /= std.unsqueeze(1);
 		norm_collection[0] = gates;
@@ -111,12 +113,12 @@ std::vector<at::Tensor> normalized_peephole_lstm_forward(
 
 			ch_gate_pair = at::matmul(hc, weight_hc_t);
 
-			mean_and_var = at::stack({ ch_gate_pair.mean(/*dim=*/1, /*keepdim=*/false), ch_gate_pair.var(/*dim=*/1, /*unbiased=*/false, /*keepdim=*/false) }, 0);
+			mean_and_var = at::stack({ ch_gate_pair.mean(/*dim=*/1, /*keepdim=*/false), ch_gate_pair.var(/*dim=*/1, /*unbiased=*/true, /*keepdim=*/false) }, 0);
 			mean_and_vars_gate_hh.select(1, i) = mean_and_var.select(1, 0);
 			mean_and_vars_gate_ch.select(1, i) = mean_and_var.select(1, 1).slice(1, 0, 3 * state_size);
 
 			norm_gate = at::sub(ch_gate_pair, mean_and_var[0].unsqueeze(1));
-			std = mean_and_var[1].add(epsilon).sqrt();
+			std = mean_and_var[1].mul(bias_factor).add(epsilon).sqrt();
 			stds_collection.slice(0, 1).select(1, i) = std;
 			norm_gate /= std.unsqueeze(1);
 			norm_gates_hh[i] = norm_gate[0];
@@ -134,11 +136,11 @@ std::vector<at::Tensor> normalized_peephole_lstm_forward(
 			tanh_cell = at::tanh(hc[1]);
 			tanh_new_cells[i] = tanh_cell;
 
-			mean_and_var = at::stack({ tanh_cell.mean(/*dim=*/0, /*keepdim=*/false), tanh_cell.var(/*dim=*/0, /*unbiased=*/false, /*keepdim=*/false) }, 0);
+			mean_and_var = at::stack({ tanh_cell.mean(/*dim=*/0, /*keepdim=*/false), tanh_cell.var(/*dim=*/0, /*unbiased=*/true, /*keepdim=*/false) }, 0);
 			mean_and_vars_tanh_cell.select(1, i) = mean_and_var;
 
 			norm_tanh_cell = at::sub(tanh_cell, mean_and_var[0]);
-			std = mean_and_var[1].add(epsilon).sqrt();
+			std = mean_and_var[1].mul(bias_factor).add(epsilon).sqrt();
 			stds_collection[2][i].slice(0, 3 * state_size) = std;
 			norm_tanh_cell /= std;
 			norm_tanh_cells[i] = norm_tanh_cell;
@@ -324,9 +326,9 @@ std::vector<at::Tensor> normalized_peephole_lstm_backward(
 	const auto forget_gates = gates.slice(2, 0, state_size);
 	const auto output_gates = gates.slice(2, 2 * state_size, 3 * state_size);
 
-	auto grad_inputs = at::empty(X.type(), { sequence_length, batch_size, input_size });
-	auto d_bnorm_tanh_new_cells = at::empty_like(bnorm_tanh_cells);
-	auto d_gates_ihc = at::empty(gates.type(), { 3, sequence_length, batch_size, gate_size });
+	auto grad_inputs = at::zeros(X.type(), { sequence_length, batch_size, input_size });
+	auto d_bnorm_tanh_new_cells = at::zeros_like(bnorm_tanh_cells);
+	auto d_gates_ihc = at::zeros(gates.type(), { 3, sequence_length, batch_size, gate_size });
 
 	grad_output *= dropout_output;
 
@@ -367,7 +369,7 @@ std::vector<at::Tensor> normalized_peephole_lstm_backward(
 							   - d_norm_tanh_new_cell.sum(0)
 							   - norm_tanh_cells[i] * (d_norm_tanh_new_cell * norm_tanh_cells[i]).sum(0)) / stds_tanh_new_cell[i];
 
-			d_new_cell = d_tanh_new_cell * tanh_new_cells[i];
+			d_new_cell = at::addcmul(grad_cell, d_tanh_new_cell, tanh_new_cells[i]);
 
 			d_norm_gate = at::cat({ d_new_cell, d_new_cell, grad_h, d_new_cell }, 1) * gates[i];
 			gates[i] = d_norm_gate;
@@ -399,7 +401,7 @@ std::vector<at::Tensor> normalized_peephole_lstm_backward(
 
 			d_tanh_new_cell = d_bnorm_tanh_new_cell * gamma_tanh_cell / stds_tanh_new_cell;
 
-			d_new_cell = d_tanh_new_cell * tanh_new_cells[i];
+			d_new_cell = at::addcmul(grad_cell, d_tanh_new_cell, tanh_new_cells[i]);
 
 			d_norm_gate = at::cat({ d_new_cell, d_new_cell, grad_h, d_new_cell }, 1) * gates[i];
 			gates[i] = d_norm_gate;
