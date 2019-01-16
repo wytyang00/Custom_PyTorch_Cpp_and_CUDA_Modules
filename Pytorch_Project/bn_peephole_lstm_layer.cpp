@@ -1,7 +1,7 @@
 #include <torch/torch.h>
 #include <vector>
 
-std::vector<at::Tensor> normalized_peephole_lstm_forward(
+std::vector<at::Tensor> bn_peephole_lstm_layer_forward(
 	at::Tensor input,
 	at::Tensor weight_ih,
 	at::Tensor weight_hh,
@@ -112,7 +112,7 @@ std::vector<at::Tensor> normalized_peephole_lstm_forward(
 			X[i].slice(1, state_size, 2 * state_size) = hc[1];
 
 			ch_gate_pair = at::matmul(hc, weight_hc_t);
-
+			
 			mean_and_var = at::stack({ ch_gate_pair.mean(/*dim=*/1, /*keepdim=*/false), ch_gate_pair.var(/*dim=*/1, /*unbiased=*/true, /*keepdim=*/false) }, 0);
 			mean_and_vars_gate_hh.select(1, i) = mean_and_var.select(1, 0);
 			mean_and_vars_gate_ch.select(1, i) = mean_and_var.select(1, 1).slice(1, 0, 3 * state_size);
@@ -128,10 +128,11 @@ std::vector<at::Tensor> normalized_peephole_lstm_forward(
 
 			current_gate.slice(1, 0, 3 * state_size).sigmoid_();
 			current_gate.slice(1, 3 * state_size).tanh_();
-			sig_gates = current_gate.slice(1, 0, 3 * state_size).chunk(3, 1);
-			tanh_gate = current_gate.slice(1, 3 * state_size);
+			//sig_gates = current_gate.slice(1, 0, 3 * state_size).chunk(3, 1);
+			//tanh_gate = current_gate.slice(1, 3 * state_size);
 
-			hc[1] = at::addcmul(tanh_gate * sig_gates[1], hc[1], sig_gates[0]);
+			//hc[1] = at::addcmul(tanh_gate * sig_gates[1], hc[1], sig_gates[0]);
+			hc[1] = at::addcmul(current_gate.slice(1, 3 * state_size) * current_gate.slice(1, state_size, 2 * state_size), hc[1], current_gate.slice(1, 0, state_size));
 
 			tanh_cell = at::tanh(hc[1]);
 			tanh_new_cells[i] = tanh_cell;
@@ -148,7 +149,8 @@ std::vector<at::Tensor> normalized_peephole_lstm_forward(
 			norm_tanh_cell = at::addcmul(beta_tanh_cell, norm_tanh_cell, gamma_tanh_cell);
 			bnorm_tanh_cells[i] = norm_tanh_cell;
 
-			hc[0] = norm_tanh_cell * sig_gates[2];
+			//hc[0] = norm_tanh_cell * sig_gates[2];
+			hc[0] = norm_tanh_cell * current_gate.slice(1, 2 * state_size, 3 * state_size);
 
 			output[i] = hc[0];
 		}
@@ -212,10 +214,11 @@ std::vector<at::Tensor> normalized_peephole_lstm_forward(
 
 			current_gate.slice(1, 0, 3 * state_size).sigmoid_();
 			current_gate.slice(1, 3 * state_size).tanh_();
-			sig_gates = current_gate.slice(1, 0, 3 * state_size).chunk(3, 1);
-			tanh_gate = current_gate.slice(1, 3 * state_size);
+			//sig_gates = current_gate.slice(1, 0, 3 * state_size).chunk(3, 1);
+			//tanh_gate = current_gate.slice(1, 3 * state_size);
 
-			hc[1] = at::addcmul(tanh_gate * sig_gates[1], hc[1], sig_gates[0]);
+			//hc[1] = at::addcmul(tanh_gate * sig_gates[1], hc[1], sig_gates[0]);
+			hc[1] = at::addcmul(current_gate.slice(1, 3 * state_size) * current_gate.slice(1, state_size, 2 * state_size), hc[1], current_gate.slice(1, 0, state_size));
 
 			tanh_cell = at::tanh(hc[1]);
 			tanh_new_cells[i] = tanh_cell;
@@ -227,7 +230,8 @@ std::vector<at::Tensor> normalized_peephole_lstm_forward(
 			norm_tanh_cell = at::addcmul(beta_tanh_cell, norm_tanh_cell, gamma_tanh_cell);
 			bnorm_tanh_cells[i] = norm_tanh_cell;
 
-			hc[0] = norm_tanh_cell * sig_gates[2];
+			//hc[0] = norm_tanh_cell * sig_gates[2];
+			hc[0] = norm_tanh_cell * current_gate.slice(1, 2 * state_size, 3 * state_size);
 
 			output[i] = hc[0];
 		}
@@ -256,7 +260,7 @@ std::vector<at::Tensor> normalized_peephole_lstm_forward(
 		X };
 }
 
-std::vector<at::Tensor> normalized_peephole_lstm_backward(
+std::vector<at::Tensor> bn_peephole_lstm_layer_backward(
 	at::Tensor grad_output,
 	at::Tensor grad_h,
 	at::Tensor grad_cell,
@@ -447,6 +451,6 @@ std::vector<at::Tensor> normalized_peephole_lstm_backward(
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
-	m.def("forward", &normalized_peephole_lstm_forward, "Normalized Peephole LSTM forward");
-	m.def("backward", &normalized_peephole_lstm_backward, "Normalized Peephole LSTM backward");
+	m.def("forward", &bn_peephole_lstm_layer_forward, "Normalized Peephole LSTM forward");
+	m.def("backward", &bn_peephole_lstm_layer_backward, "Normalized Peephole LSTM backward");
 }
