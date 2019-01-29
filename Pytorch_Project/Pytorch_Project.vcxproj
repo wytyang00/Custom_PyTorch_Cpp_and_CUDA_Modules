@@ -124,17 +124,17 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\..\..\..\..\Desktop\test.cpp" />
     <ClCompile Include="bn_peephole_lstm_layer.cpp" />
-    <ClCompile Include="D:\GitHub\deep-learning-v2-pytorch\recurrent-neural-networks\char-rnn\normalized_peephole_lstm_extension\normalized_peephole_lstm.cpp" />
     <ClCompile Include="ln_lstm_layer.cpp" />
-    <ClCompile Include="normalized_lstm.cpp" />
+    <ClCompile Include="ln_peephole_lstm_layer.cpp" />
+    <ClCompile Include="ln_peephole_lstm_layer_cuda.cpp" />
     <ClCompile Include="peephole_lstm_cuda.cpp" />
     <ClCompile Include="peephole_lstm_multilayer.cpp" />
     <ClCompile Include="peephole_lstm.cpp" />
     <ClCompile Include="peephole_lstm_cell.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <CudaCompile Include="ln_peephole_lstm_layer_cuda_kernel.cu" />
     <CudaCompile Include="peephole_lstm_cuda_kernal.cu" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -152,8 +152,7 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_backward(
 	at::Tensor gamma_ih,
 	at::Tensor gamma_hh,
 	at::Tensor gamma_ch,
-	at::Tensor gamma_tanh_cell,
-	bool training)
+	at::Tensor gamma_tanh_cell)
 {
 	const auto sequence_length = X.size(0);
 	const auto batch_size = X.size(1);

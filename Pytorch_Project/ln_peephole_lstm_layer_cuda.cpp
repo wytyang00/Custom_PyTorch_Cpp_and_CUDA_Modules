@@ -1,37 +1,35 @@
 #include <torch/torch.h>
 #include <vector>
 
-std::vector<at::Tensor> ln_peephole_lstm_layer_forward(
-	at::Tensor input,
-	at::Tensor weight_ih,
-	at::Tensor weight_hh,
-	at::Tensor weight_ch,
-	at::Tensor bias,
-	at::Tensor gamma_ih,
-	at::Tensor gamma_hh,
-	at::Tensor gamma_ch,
-	at::Tensor gamma_tanh_cell,
-	at::Tensor beta_tanh_cell,
-	at::Tensor hidden,
-	at::Tensor cell,
-	double epsilon,
-	double dropout_p,
-	bool training)
+std::vector<at::Tensor> ln_peephole_lstm_layer_cpu_forward(
+	at::Tensor &input,
+	at::Tensor &weight_ih,
+	at::Tensor &weight_hh,
+	at::Tensor &weight_ch,
+	at::Tensor &bias,
+	at::Tensor &gamma_ih,
+	at::Tensor &gamma_hh,
+	at::Tensor &gamma_ch,
+	at::Tensor &gamma_tanh_cell,
+	at::Tensor &beta_tanh_cell,
+	at::Tensor &hidden,
+	at::Tensor &cell,
+	double const &epsilon,
+	double const &dropout_p,
+	bool const &training,
+	int64_t const &sequence_length,
+	int64_t const &batch_size,
+	int64_t const &input_size,
+	int64_t const &state_size,
+	int64_t const &state_size_3,
+	int64_t const &gate_size)
 {
-	AT_ASSERTM(input.dim() == 3, "### input must be a 3D tensor ###");
-	const auto sequence_length = input.size(0);
-	const auto batch_size = input.size(1);
-	const auto input_size = input.size(2);
-	const auto state_size = weight_ih.size(0) / 4;
-	const auto state_size_3 = 3 * state_size;
-	const auto gate_size = state_size_3 + state_size;
-
 	at::Tensor output = at::zeros(weight_ih.type(), { sequence_length, batch_size, state_size });
 
 	at::Tensor tanh_new_cells = at::zeros(cell.type(), { sequence_length, batch_size, state_size });
 	at::Tensor lnorm_tanh_cells = at::zeros_like(tanh_new_cells);
 
-	at::Tensor norm_collection = at::zeros(input.type(), { 3, sequence_length, batch_size, 4 * state_size });
+	at::Tensor norm_collection = at::zeros(input.type(), { 3, sequence_length, batch_size, gate_size });
 	at::Tensor norm_gates_ih = norm_collection[0];
 	at::Tensor norm_gates_hh = norm_collection[1];
 	at::Tensor norm_gates_ch = norm_collection[2].slice(2, 0, state_size_3);
@@ -135,25 +133,24 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_forward(
 		X };
 }
 
-std::vector<at::Tensor> ln_peephole_lstm_layer_backward(
-	at::Tensor grad_output,
-	at::Tensor grad_h,
-	at::Tensor grad_cell,
-	at::Tensor norm_collection,
-	at::Tensor tanh_new_cells,
-	at::Tensor lnorm_tanh_cells,
-	at::Tensor stds_collection,
-	at::Tensor dropout,
-	at::Tensor gates,
-	at::Tensor X,
-	at::Tensor weight_ih,
-	at::Tensor weight_hh,
-	at::Tensor weight_ch,
-	at::Tensor gamma_ih,
-	at::Tensor gamma_hh,
-	at::Tensor gamma_ch,
-	at::Tensor gamma_tanh_cell,
-	bool training)
+std::vector<at::Tensor> ln_peephole_lstm_layer_cpu_backward(
+	at::Tensor &grad_output,
+	at::Tensor &grad_h,
+	at::Tensor &grad_cell,
+	at::Tensor &norm_collection,
+	at::Tensor &tanh_new_cells,
+	at::Tensor &lnorm_tanh_cells,
+	at::Tensor &stds_collection,
+	at::Tensor &dropout,
+	at::Tensor &gates,
+	at::Tensor &X,
+	at::Tensor &weight_ih,
+	at::Tensor &weight_hh,
+	at::Tensor &weight_ch,
+	at::Tensor &gamma_ih,
+	at::Tensor &gamma_hh,
+	at::Tensor &gamma_ch,
+	at::Tensor &gamma_tanh_cell)
 {
 	const auto sequence_length = X.size(0);
 	const auto batch_size = X.size(1);
@@ -299,6 +296,167 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_backward(
 			 grad_gamma_ch,
 			 grad_gamma_tanh_cell,
 			 grad_beta_tanh_cell };
+}
+
+std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_forward(
+	at::Tensor const &input,
+	at::Tensor const &weight_ih,
+	at::Tensor const &weight_hh,
+	at::Tensor const &weight_ch,
+	at::Tensor const &bias,
+	at::Tensor const &gamma_ih,
+	at::Tensor const &gamma_hh,
+	at::Tensor const &gamma_ch,
+	at::Tensor const &gamma_tanh_cell,
+	at::Tensor const &beta_tanh_cell,
+	at::Tensor &hidden,
+	at::Tensor &cell,
+	double const &epsilon,
+	double const &dropout_p,
+	bool const &training,
+	int64_t const &sequence_length,
+	int64_t const &batch_size,
+	int64_t const &input_size,
+	int64_t const &state_size,
+	int64_t const &state_size_3,
+	int64_t const &gate_size);
+
+std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
+	at::Tensor &grad_output,
+	at::Tensor &grad_h,
+	at::Tensor &grad_cell,
+	at::Tensor const &norm_collection,
+	at::Tensor &tanh_new_cells,
+	at::Tensor const &lnorm_tanh_cells,
+	at::Tensor &stds_collection,
+	at::Tensor const &dropout,
+	at::Tensor &gates,
+	at::Tensor &X,
+	at::Tensor const &weight_ih,
+	at::Tensor const &weight_hh,
+	at::Tensor const &weight_ch,
+	at::Tensor const &gamma_ih,
+	at::Tensor const &gamma_hh,
+	at::Tensor const &gamma_ch,
+	at::Tensor const &gamma_tanh_cell);
+
+std::vector<at::Tensor> ln_peephole_lstm_layer_forward(
+	at::Tensor input,
+	at::Tensor weight_ih,
+	at::Tensor weight_hh,
+	at::Tensor weight_ch,
+	at::Tensor bias,
+	at::Tensor gamma_ih,
+	at::Tensor gamma_hh,
+	at::Tensor gamma_ch,
+	at::Tensor gamma_tanh_cell,
+	at::Tensor beta_tanh_cell,
+	at::Tensor hidden,
+	at::Tensor cell,
+	double epsilon,
+	double dropout_p,
+	bool training)
+{
+	// Input dimension check (Confusion with input dimensions are quite usual. Please keep this check.)
+	AT_ASSERTM(input.dim() == 3, "### The input tensor must have 3 dimensions, but the given tensor only has ", input.dim(), " dimensions ###");
+
+	const auto sequence_length = input.size(0);
+	const auto batch_size = input.size(1);
+	const auto input_size = input.size(2);
+	const auto state_size = weight_ih.size(0) / 4;
+	const auto gate_size = weight_ih.size(0);
+	const auto state_size_3 = gate_size - state_size;
+
+	// Hiddens check (Frequent problems. Please, keep these checks.)
+	AT_ASSERTM((hidden.dim() == 2) && (hidden.size(0) == batch_size) && (hidden.size(1) == state_size),
+			   "### Invalid dimensions for the hidden state: ", hidden.sizes(), " Expected dimensions: ", at::IntList({ batch_size, state_size }), " ###");
+	AT_ASSERTM((cell.dim() == 2) && (cell.size(0) == batch_size) && (cell.size(1) == state_size),
+			   "### Invalid dimensions for the cell state: ", cell.sizes(), " Expected dimensions: ", at::IntList({ batch_size, state_size }), " ###");
+
+	// Dropout check (Simple check, should be checked when creating a model as well. In that case, it might be unnecessary to do this test again here.)
+	AT_ASSERTM((dropout_p >= 0) || (dropout_p <= 1), "### The value of dropout must be within the range of [0, 1], but ", dropout_p, " was given ###");
+
+	// Device check (This part is important since this issue happens quite often)
+	bool use_cuda = input.is_cuda();
+	AT_ASSERTM((use_cuda == weight_ih.is_cuda()) && (use_cuda == weight_hh.is_cuda()) && (use_cuda == weight_ch.is_cuda())
+			   && (use_cuda == bias.is_cuda()) && (use_cuda == gamma_ih.is_cuda()) && (use_cuda == gamma_hh.is_cuda()) && (use_cuda == gamma_ch.is_cuda())
+			   && (use_cuda == gamma_tanh_cell.is_cuda()) && (use_cuda == beta_tanh_cell.is_cuda()) && (use_cuda == hidden.is_cuda()) && (use_cuda == cell.is_cuda()),
+			   "### All tensors must be located in either CPU or CUDA devices together, but some of the given tensors are in a different device ###");
+
+	if (use_cuda)
+	{
+		// Contiguity check (IMPORTANT FOR CUDA OPERATIONS; non-contiguous tensors result in irregular indexing and, therefore, calculation errors)
+		AT_ASSERTM(input.is_contiguous(), "### input tensor is not contiguous ###");
+		AT_ASSERTM(weight_ih.is_contiguous(), "### weight_ih tensor is not contiguous ###");
+		AT_ASSERTM(weight_hh.is_contiguous(), "### weight_hh tensor is not contiguous ###");
+		AT_ASSERTM(weight_ch.is_contiguous(), "### weight_ch tensor is not contiguous ###");
+		AT_ASSERTM(bias.is_contiguous(), "### bias tensor is not contiguous ###");
+		AT_ASSERTM(gamma_ih.is_contiguous(), "### gamma_ih tensor is not contiguous ###");
+		AT_ASSERTM(gamma_hh.is_contiguous(), "### gamma_hh tensor is not contiguous ###");
+		AT_ASSERTM(gamma_ch.is_contiguous(), "### gamma_ch tensor is not contiguous ###");
+		AT_ASSERTM(gamma_tanh_cell.is_contiguous(), "### gamma_tanh_cell tensor is not contiguous ###");
+		AT_ASSERTM(beta_tanh_cell.is_contiguous(), "### beta_tanh_cell tensor is not contiguous ###");
+		AT_ASSERTM(hidden.is_contiguous(), "### hidden tensor is not contiguous ###");
+		AT_ASSERTM(cell.is_contiguous(), "### cell tensor is not contiguous ###");
+
+		return ln_peephole_lstm_layer_cuda_forward(input, weight_ih, weight_hh, weight_ch, bias, gamma_ih, gamma_hh, gamma_ch, gamma_tanh_cell, beta_tanh_cell, hidden, cell, epsilon, dropout_p, training, sequence_length, batch_size, input_size, state_size, state_size_3, gate_size);
+	}
+	else
+	{
+		return ln_peephole_lstm_layer_cpu_forward(input, weight_ih, weight_hh, weight_ch, bias, gamma_ih, gamma_hh, gamma_ch, gamma_tanh_cell, beta_tanh_cell, hidden, cell, epsilon, dropout_p, training, sequence_length, batch_size, input_size, state_size, state_size_3, gate_size);
+	}
+}
+
+std::vector<at::Tensor> ln_peephole_lstm_layer_backward(
+	at::Tensor &grad_output,
+	at::Tensor &grad_h,
+	at::Tensor &grad_cell,
+	at::Tensor &norm_collection,
+	at::Tensor &tanh_new_cells,
+	at::Tensor &lnorm_tanh_cells,
+	at::Tensor &stds_collection,
+	at::Tensor &dropout,
+	at::Tensor &gates,
+	at::Tensor &X,
+	at::Tensor &weight_ih,
+	at::Tensor &weight_hh,
+	at::Tensor &weight_ch,
+	at::Tensor &gamma_ih,
+	at::Tensor &gamma_hh,
+	at::Tensor &gamma_ch,
+	at::Tensor &gamma_tanh_cell)
+{
+	// Not much checks since the values are saved during the forward pass and are supposed to be valid... just some device and contiguity checks
+	bool use_cuda = grad_output.is_cuda();
+	AT_ASSERTM((use_cuda == grad_h.is_cuda()) && (use_cuda == grad_cell.is_cuda()) && (use_cuda == tanh_new_cells.is_cuda()) && (use_cuda == dropout.is_cuda())
+			   && (use_cuda == gates.is_cuda()) && (use_cuda == X.is_cuda()) && (use_cuda == weight_ih.is_cuda()) && (use_cuda == weight_hh.is_cuda()) && (use_cuda == weight_ch.is_cuda())
+			   && (use_cuda == gamma_ih.is_cuda()) && (use_cuda == gamma_hh.is_cuda()) && (use_cuda == gamma_ch.is_cuda()) && (use_cuda == gamma_tanh_cell.is_cuda()),
+			   "### All tensors must be located in either CPU or CUDA devices together, but some of the given tensors are in a different device ###");
+
+	if (use_cuda)
+	{
+		// Contiguity check
+		AT_ASSERTM(grad_output.is_contiguous(), "### grad_output tensor is not contiguous ###");
+		AT_ASSERTM(grad_h.is_contiguous(), "### grad_h tensor is not contiguous ###");
+		AT_ASSERTM(grad_cell.is_contiguous(), "### grad_cell tensor is not contiguous ###");
+		AT_ASSERTM(tanh_new_cells.is_contiguous(), "### tanh_new_cells tensor is not contiguous ###");
+		AT_ASSERTM(dropout.is_contiguous(), "### dropout tensor is not contiguous ###");
+		AT_ASSERTM(gates.is_contiguous(), "### gates tensor is not contiguous ###");
+		AT_ASSERTM(X.is_contiguous(), "### X tensor is not contiguous ###");
+		AT_ASSERTM(weight_ih.is_contiguous(), "### weight_ih tensor is not contiguous ###");
+		AT_ASSERTM(weight_hh.is_contiguous(), "### weight_ih tensor is not contiguous ###");
+		AT_ASSERTM(weight_ch.is_contiguous(), "### weight_ih tensor is not contiguous ###");
+		AT_ASSERTM(gamma_ih.is_contiguous(), "### gamma_ih tensor is not contiguous ###");
+		AT_ASSERTM(gamma_hh.is_contiguous(), "### gamma_hh tensor is not contiguous ###");
+		AT_ASSERTM(gamma_ch.is_contiguous(), "### gamma_ch tensor is not contiguous ###");
+		AT_ASSERTM(gamma_tanh_cell.is_contiguous(), "### gamma_tanh_cell tensor is not contiguous ###");
+
+		return ln_peephole_lstm_layer_cuda_backward(grad_output, grad_h, grad_cell, norm_collection, tanh_new_cells, lnorm_tanh_cells, stds_collection, dropout, gates, X, weight_ih, weight_hh, weight_ch, gamma_ih, gamma_hh, gamma_ch, gamma_tanh_cell);
+	}
+	else
+	{
+		return ln_peephole_lstm_layer_cpu_backward(grad_output, grad_h, grad_cell, norm_collection, tanh_new_cells, lnorm_tanh_cells, stds_collection, dropout, gates, X, weight_ih, weight_hh, weight_ch, gamma_ih, gamma_hh, gamma_ch, gamma_tanh_cell);
+	}
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)

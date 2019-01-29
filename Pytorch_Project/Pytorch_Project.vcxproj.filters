@@ -27,24 +27,24 @@
     <ClCompile Include="peephole_lstm_cuda.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\..\..\..\..\Desktop\test.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="normalized_lstm.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="bn_peephole_lstm_layer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ln_lstm_layer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="D:\GitHub\deep-learning-v2-pytorch\recurrent-neural-networks\char-rnn\normalized_peephole_lstm_extension\normalized_peephole_lstm.cpp">
+    <ClCompile Include="ln_peephole_lstm_layer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ln_peephole_lstm_layer_cuda.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="peephole_lstm_cuda_kernal.cu">
+      <Filter>Source Files</Filter>
+    </CudaCompile>
+    <CudaCompile Include="ln_peephole_lstm_layer_cuda_kernel.cu">
       <Filter>Source Files</Filter>
     </CudaCompile>
   </ItemGroup>
