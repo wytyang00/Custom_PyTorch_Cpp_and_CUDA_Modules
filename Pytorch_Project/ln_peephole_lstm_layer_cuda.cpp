@@ -2,300 +2,282 @@
 #include <vector>
 
 std::vector<at::Tensor> ln_peephole_lstm_layer_cpu_forward(
-	at::Tensor &input,
-	at::Tensor &weight_ih,
-	at::Tensor &weight_hh,
-	at::Tensor &weight_ch,
-	at::Tensor &bias,
-	at::Tensor &gamma_ih,
-	at::Tensor &gamma_hh,
-	at::Tensor &gamma_ch,
-	at::Tensor &gamma_tanh_cell,
-	at::Tensor &beta_tanh_cell,
-	at::Tensor &hidden,
-	at::Tensor &cell,
+	at::Tensor const &input,
+	at::Tensor const &weight_ih,
+	at::Tensor const &weight_hh,
+	at::Tensor const &weight_ch,
+	at::Tensor const &bias,
+	at::Tensor const &gamma_f,
+	at::Tensor const &gamma_i,
+	at::Tensor const &gamma_g,
+	at::Tensor const &gamma_o,
+	at::Tensor const &gamma_new_cell,
+	at::Tensor const &beta_new_cell,
+	at::Tensor const &hidden,
+	at::Tensor const &cell,
 	double const &epsilon,
 	double const &dropout_p,
+	bool const &dropout_on_output,
 	bool const &training,
 	int64_t const &sequence_length,
 	int64_t const &batch_size,
 	int64_t const &input_size,
 	int64_t const &state_size,
+	int64_t const &state_size_2,
 	int64_t const &state_size_3,
 	int64_t const &gate_size)
 {
-	at::Tensor output = at::zeros(weight_ih.type(), { sequence_length, batch_size, state_size });
+	const auto options = weight_ih.options();
 
-	at::Tensor tanh_new_cells = at::zeros(cell.type(), { sequence_length, batch_size, state_size });
-	at::Tensor lnorm_tanh_cells = at::zeros_like(tanh_new_cells);
+	auto hiddens = at::empty({ sequence_length, batch_size, state_size }, options);
+	auto cells = at::empty({ sequence_length + 1, batch_size, state_size }, options);
 
-	at::Tensor norm_collection = at::zeros(input.type(), { 3, sequence_length, batch_size, gate_size });
-	at::Tensor norm_gates_ih = norm_collection[0];
-	at::Tensor norm_gates_hh = norm_collection[1];
-	at::Tensor norm_gates_ch = norm_collection[2].slice(2, 0, state_size_3);
-	at::Tensor norm_tanh_cells = norm_collection[2].slice(2, state_size_3);
+	auto gates_fig_stds = at::empty({ sequence_length, batch_size, 3, 1 }, options);
+	auto gates_fig_normalized = at::empty({ sequence_length, batch_size, 3, state_size }, options);
+	auto gates_fig = at::empty({ sequence_length, batch_size, 3, state_size }, options);
 
-	at::Tensor gates = at::matmul(input, weight_ih.transpose(0, 1));
-	at::Tensor X = at::zeros(weight_ih.type(), { sequence_length, batch_size, (input_size + (2 * state_size)) });
-	X.slice(2, 2 * state_size) = input;
+	auto gates_o_stds = at::empty({ sequence_length, batch_size, 1 }, options);
+	auto gates_o_normalized = at::empty({ sequence_length, batch_size, state_size }, options);
+	auto gates_o = at::empty({ sequence_length, batch_size, state_size }, options);
+
+	auto new_cells_stds = at::empty({ sequence_length, batch_size, 1 }, options);
+	auto new_cells_normalized = at::empty({ sequence_length, batch_size, state_size }, options);
+
+	auto tanh_new_cells = at::empty({ sequence_length, batch_size, state_size }, options);
+
+	auto outputs = at::empty({ sequence_length, batch_size, state_size }, options);
 
 	at::Tensor dropout;
-	if (dropout_p <= 0. || !training) { dropout = at::ones(output.type(), { 2, sequence_length, batch_size, state_size }); }
+	if (dropout_p <= 0. || !training) { dropout = at::ones({ 2, sequence_length, batch_size, state_size }, options); }
 	else
 	{
-		if (dropout_p >= 1.) { dropout = at::zeros(output.type(), { 2, sequence_length, batch_size, state_size }); }
-		else { dropout = at::bernoulli(at::zeros(output.type(), { 2, sequence_length, batch_size, state_size }), (1 - dropout_p)).div(1 - dropout_p); }
+		if (dropout_p >= 1.) { dropout = at::zeros({ 2, sequence_length, batch_size, state_size }, options); }
+		else { dropout = at::bernoulli(at::zeros({ 2, sequence_length, batch_size, state_size }, options), (1 - dropout_p)).div(1 - dropout_p); }
+
+		if (!dropout_on_output) { dropout[1] = 1; }
 	}
-	auto dropout_hidden = dropout[0];
-	auto dropout_output = dropout[1];
+	const auto dropout_candidate_cell = dropout[0];
+	const auto dropout_output = dropout[1];
 
-	at::Tensor stds_collection;
+	const auto ih = at::matmul(input, weight_ih.t());
 
-	auto hc = at::stack({ hidden, cell });
+	auto hc = at::cat({ hidden, cell }, 1);
+	const auto weight_hc_h = at::cat({ weight_hh.t(),
+									   at::cat({ weight_ch.slice(0, 0, state_size).diag(),
+												 weight_ch.slice(0, state_size, state_size_2).diag(),
+												 at::zeros({ state_size_2, state_size }, options) }).t() });
 
-	const auto weight_hc_t = at::stack({ weight_hh, at::cat({ weight_ch, at::zeros(weight_ch.type(), { state_size, state_size }) }, 0) }).transpose(1, 2);
-	const auto gammas_hh_ch = at::stack({ gamma_hh, at::cat({ gamma_ch, at::zeros(gamma_ch.type(), { state_size }) }, 0) }, 0).unsqueeze(1);
-	at::Tensor ch_gate_pair;
-	at::Tensor mean;
-	at::Tensor std;
+	const auto weight_co = weight_ch.slice(0, state_size_2);
+
+	const auto gamma_fig = at::stack({ gamma_f, gamma_i, gamma_g });
+
+	const auto bias_fig = bias.slice(0, 0, state_size_3).view({ 3, state_size });
+	const auto bias_o = bias.slice(0, state_size_3);
+
 	at::Tensor current_gate;
-	at::Tensor norm_gate;
+	at::Tensor output_gate;
+	at::Tensor std;
 	at::Tensor tanh_cell;
-	at::Tensor norm_tanh_cell;
 
-	stds_collection = at::zeros(gates.type(), { 4, sequence_length, batch_size });
-
-	gates -= gates.mean(/*dim=*/2, /*keepdim=*/true);
-	std = gates.var(/*dim=*/2, /*unbiased=*/false, /*keepdim=*/false).add(epsilon).sqrt();
-	stds_collection[0] = std;
-	gates /= std.unsqueeze(2);
-	norm_collection[0] = gates;
-	gates = at::addcmul(bias, gates, gamma_ih);
-
-	// Forward Loop
 	for (int i = 0; i < sequence_length; i++)
 	{
-		current_gate = gates[i];
+		hiddens[i] = hc.slice(1, 0, state_size);
+		cells[i] = hc.slice(1, state_size);
 
-		hc[0] *= dropout_hidden[i];
-		X[i].slice(1, 0, state_size) = hc[0];
-		X[i].slice(1, state_size, 2 * state_size) = hc[1];
+		current_gate = at::addmm(ih[i], hc, weight_hc_h).view({ batch_size, 4, state_size });
+		current_gate.slice(1, 0, 3) -= current_gate.slice(1, 0, 3).mean(/*dim=*/2, /*keepdim=*/true);
+		std = current_gate.slice(1, 0, 3).var(/*dim=*/2, /*unbiased=*/false, /*keepdim=*/true).add(epsilon).sqrt();
+		gates_fig_stds[i] = std;
+		current_gate.slice(1, 0, 3) /= std;
+		gates_fig_normalized[i] = current_gate.slice(1, 0, 3);
+		current_gate.slice(1, 0, 3) = at::addcmul(bias_fig, current_gate.slice(1, 0, 3), gamma_fig);
+		current_gate.slice(1, 0, 2).sigmoid_();
+		current_gate.select(1, 2).tanh_();
+		gates_fig[i] = current_gate.slice(1, 0, 3);
+		current_gate.select(1, 2) *= dropout_candidate_cell[i];
 
-		ch_gate_pair = at::matmul(hc, weight_hc_t);
+		hc.slice(1, state_size) = at::addcmul(hc.slice(1, state_size) * current_gate.select(1, 0), current_gate.select(1, 1), current_gate.select(1, 2));
+		hc.slice(1, state_size) -= hc.slice(1, state_size).mean(/*dim=*/1, /*keepdim=*/true);
+		std = hc.slice(1, state_size).var(/*dim=*/1, /*unbiased=*/false, /*keepdim=*/true).add(epsilon).sqrt();
+		new_cells_stds[i] = std;
+		hc.slice(1, state_size) /= std;
+		new_cells_normalized[i] = hc.slice(1, state_size);
+		hc.slice(1, state_size) = at::addcmul(beta_new_cell, hc.slice(1, state_size), gamma_new_cell);
 
-		mean = at::stack({ ch_gate_pair[0].mean(/*dim=*/1, /*keepdim=*/true),
-						   ch_gate_pair[1].slice(1, 0, state_size_3).mean(/*dim=*/1, /*keepdim=*/true) }, 0);
-		norm_gate = ch_gate_pair.sub(mean);
-		std = at::stack({ norm_gate[0].var(/*dim=*/1, /*unbiased=*/false, /*keepdim*/false),
-						  norm_gate[1].slice(1, 0, state_size_3).var(/*dim=*/1, /*unbiased=*/false, /*keepdim*/false) }, 0).add(epsilon).sqrt();
-		stds_collection.slice(0, 1, 3).select(1, i) = std;
-		norm_gate /= std.unsqueeze(2);
-		norm_gates_hh[i] = norm_gate[0];
-		norm_gates_ch[i] = norm_gate[1].slice(1, 0, state_size_3);
+		output_gate = at::addcmul(current_gate.select(1, 3), hc.slice(1, state_size), weight_co);
+		output_gate -= output_gate.mean(/*dim=*/1, /*keepdim=*/true);
+		std = output_gate.var(/*dim=*/1, /*unbiased=*/false, /*keepdim=*/true).add(epsilon).sqrt();
+		gates_o_stds[i] = std;
+		output_gate /= std;
+		gates_o_normalized[i] = output_gate;
+		output_gate = at::addcmul(bias_o, output_gate, gamma_o);
+		output_gate.sigmoid_();
+		gates_o[i] = output_gate;
 
-		current_gate += norm_gate.mul(gammas_hh_ch).sum(0);
-
-		current_gate.slice(1, 0, state_size_3).sigmoid_();
-		current_gate.slice(1, state_size_3).tanh_();
-
-		hc[1] = at::addcmul(current_gate.slice(1, state_size_3) * current_gate.slice(1, state_size, 2 * state_size), hc[1], current_gate.slice(1, 0, state_size));
-
-		tanh_cell = at::tanh(hc[1]);
+		tanh_cell = hc.slice(1, state_size).tanh();
 		tanh_new_cells[i] = tanh_cell;
 
-		norm_tanh_cell = tanh_cell.sub(tanh_cell.mean(/*dim=*/1, /*keepdim=*/true));
-		std = tanh_cell.var(/*dim=*/1, /*unbiased=*/false, /*keepdim=*/false).add(epsilon).sqrt();
-		stds_collection[3][i] = std;
-		norm_tanh_cell /= std.unsqueeze(1);
-		norm_tanh_cells[i] = norm_tanh_cell;
+		hc.slice(1, 0, state_size) = output_gate * tanh_cell;
 
-		norm_tanh_cell = at::addcmul(beta_tanh_cell, norm_tanh_cell, gamma_tanh_cell);
-		lnorm_tanh_cells[i] = norm_tanh_cell;
-
-		//hc[0] = norm_tanh_cell * sig_gates[2];
-		hc[0] = norm_tanh_cell * current_gate.slice(1, 2 * state_size, state_size_3);
-
-		output[i] = hc[0];
+		outputs[i] = hc.slice(1, 0, state_size);
 	}
+	cells[sequence_length] = hc.slice(1, state_size);
 
 	// Output Dropout
-	output *= dropout_output;
+	outputs *= dropout_output;
 
-	return { output,
-		hc[0],
-		hc[1],
-		norm_collection,
+	return { outputs,
+		hc.slice(1, 0, state_size).contiguous(),
+		hc.slice(1, state_size).contiguous(),
+		input,
+		hiddens,
+		cells,
+		gates_fig,
+		gates_fig_normalized,
+		gates_fig_stds,
+		gates_o,
+		gates_o_normalized,
+		gates_o_stds,
+		new_cells_normalized,
+		new_cells_stds,
 		tanh_new_cells,
-		lnorm_tanh_cells,
-		stds_collection,
-		dropout,
-		gates,
-		X };
+		dropout };
 }
 
 std::vector<at::Tensor> ln_peephole_lstm_layer_cpu_backward(
 	at::Tensor &grad_output,
-	at::Tensor &grad_h,
+	at::Tensor &grad_hidden,
 	at::Tensor &grad_cell,
-	at::Tensor &norm_collection,
+	at::Tensor const &input,
+	at::Tensor const &hiddens,
+	at::Tensor const &cells,
+	at::Tensor const &gates_fig,
+	at::Tensor const &gates_fig_normalized,
+	at::Tensor &gates_fig_stds,
+	at::Tensor const &gates_o,
+	at::Tensor const &gates_o_normalized,
+	at::Tensor &gates_o_stds,
+	at::Tensor const &new_cells_normalized,
+	at::Tensor &new_cells_stds,
 	at::Tensor &tanh_new_cells,
-	at::Tensor &lnorm_tanh_cells,
-	at::Tensor &stds_collection,
-	at::Tensor &dropout,
-	at::Tensor &gates,
-	at::Tensor &X,
-	at::Tensor &weight_ih,
-	at::Tensor &weight_hh,
-	at::Tensor &weight_ch,
-	at::Tensor &gamma_ih,
-	at::Tensor &gamma_hh,
-	at::Tensor &gamma_ch,
-	at::Tensor &gamma_tanh_cell)
+	at::Tensor const &dropout,
+	at::Tensor const &weight_ih,
+	at::Tensor const &weight_hh,
+	at::Tensor const &weight_ch,
+	at::Tensor const &gamma_f,
+	at::Tensor const &gamma_i,
+	at::Tensor const &gamma_g,
+	at::Tensor const &gamma_o,
+	at::Tensor const &gamma_new_cell)
 {
-	const auto sequence_length = X.size(0);
-	const auto batch_size = X.size(1);
-	const auto input_size = weight_ih.size(1);
-	const auto state_size = grad_h.size(1);
-	const auto state_size_3 = 3 * state_size;
+	const auto sequence_length = input.size(0);
+	const auto batch_size = input.size(1);
+	const auto input_size = input.size(2);
+	const auto state_size = hiddens.size(2);
+	const auto state_size_2 = 2 * state_size;
+	const auto state_size_3 = state_size_2 + state_size;
 	const auto gate_size = state_size_3 + state_size;
-	
-	const bool state_ge_input = (state_size >= input_size);
-	at::Tensor weights;
-	if (state_ge_input)
-	{
-		if (state_size == input_size)
-		{
-			X = at::stack({ X.slice(2, 2 * state_size), X.slice(2, 0, state_size), X.slice(2, state_size, 2 * state_size) }, 0);
-			weights = at::stack({ weight_ih, weight_hh, at::cat({ weight_ch, at::zeros(weight_ch.type(), { state_size, state_size }) }, 0) }, 0);
-		}
-		else
-		{
-			const int diff = state_size - input_size;
-			X = at::stack({ at::cat({ X.slice(2, 2 * state_size), at::zeros(X.type(), { sequence_length, batch_size, diff }) }, 2),
-							X.slice(2, 0, state_size),
-							X.slice(2, state_size, 2 * state_size) }, 0);
-			weights = at::stack({ at::cat({ weight_ih, at::zeros(weight_ih.type(), { gate_size, diff }) }, 1),
-								  weight_hh,
-								  at::cat({ weight_ch, at::zeros(weight_ch.type(), { state_size, state_size }) }, 0) }, 0);
-		}
-	}
-	else
-	{
-		const int diff = input_size - state_size;
-		X = at::cat({ X.slice(2, 2 * state_size).unsqueeze(0),
-					  at::cat({ at::stack({ X.slice(2, 0, state_size),
-											X.slice(2, state_size, 2 * state_size) }, 0),
-					  at::zeros(X.type(), { 2, sequence_length, batch_size, diff })}, 3) }, 0);
-		weights = at::cat({ weight_ih,
-							at::cat({ at::stack({ weight_hh,
-												 at::cat({ weight_ch, at::zeros(weight_ch.type(), { state_size, state_size }) }, 0) }, 0),
-												 at::zeros(weight_hh.type(), { 2, gate_size, diff }) }, 2) }, 0);
-	}
 
-	const auto gammas_ihc = at::stack({ gamma_ih, gamma_hh, at::cat({ gamma_ch, at::zeros(gamma_ch.type(), { state_size }) }, 0) }, 0).unsqueeze(1);
+	gates_fig_stds *= state_size;
+	gates_o_stds *= state_size;
+	new_cells_stds *= state_size;
 
-	const auto norm_ihc = norm_collection;
-	const auto norm_tanh_cells = norm_collection[2].slice(2, state_size_3);
+	const auto dropout_candidate_cells = dropout[0];
+	grad_output *= dropout[1];
 
-	const auto dropout_hidden = dropout[0];
-	const auto dropout_output = dropout[1];
+	auto grad_inputs = at::zeros_like(input);
 
-	const auto forget_gates = gates.slice(2, 0, state_size);
-	const auto output_gates = gates.slice(2, 2 * state_size, state_size_3);
+	const auto weights = at::cat({ weight_hh,
+								   at::cat({ weight_ch.slice(0, 0, state_size).diag(),
+											 weight_ch.slice(0, state_size, state_size_2).diag(),
+											 at::zeros({ state_size_2, state_size }, weight_ch.options()) }),
+								   weight_ih }, 1);
+	const auto weight_co = weight_ch.slice(0, state_size_2);
+	const auto gamma_fig = at::stack({ gamma_f, gamma_i, gamma_g });
 
-	auto grad_inputs = at::zeros(X.type(), { sequence_length, batch_size, input_size });
-	auto d_lnorm_tanh_new_cells = at::zeros_like(lnorm_tanh_cells);
-	auto d_gates_ihc = at::zeros(gates.type(), { 3, sequence_length, batch_size, gate_size });
+	const auto forget_gates = gates_fig.select(2, 0);
 
-	grad_output *= dropout_output;
+	auto grad_new_cells = at::empty_like(new_cells_normalized);
+	auto grad_gates_layer_normalized = at::stack({ cells.slice(0, 0, sequence_length), //forget
+												   gates_fig.select(2, 2).mul(dropout_candidate_cells), //input
+												   gates_fig.select(2, 1).mul(dropout_candidate_cells), //candidate
+												   tanh_new_cells }, 2) //output
+		* at::cat({ gates_fig.slice(2, 0, 2).mul(1 - gates_fig.slice(2, 0, 2)),
+					(1 - gates_fig.slice(2, 2).pow(2)),
+					gates_o.mul(1 - gates_o).unsqueeze(2) }, 2);
+	tanh_new_cells = (1 - tanh_new_cells.pow(2)) * gates_o;
+	auto grad_gates_layer_normalized_fig = grad_gates_layer_normalized.slice(2, 0, 3);
+	auto grad_gates_layer_normalized_o = grad_gates_layer_normalized.select(2, 3);
+	auto grad_gates_raw = at::empty_like(grad_gates_layer_normalized);
+	auto grad_gates_raw_fig = grad_gates_raw.slice(2, 0, 3);
+	auto grad_gates_raw_o = grad_gates_raw.select(2, 3);
 
-	gates = at::cat({ X[2],
-					  gates.slice(/*dim=*/2, state_size_3),
-					  lnorm_tanh_cells,
-					  gates.slice(/*dim=*/2, state_size, 2 * state_size) }, /*dim=*/2)
-		    * at::cat({ (gates.slice(/*dim=*/2, 0, state_size_3) * (1 - gates.slice(/*dim=*/2, 0, state_size_3))),
-					    (1 - gates.slice(/*dim=*/2, state_size_3).pow(2)) }, /*dim=*/2);
+	at::Tensor grad_output_gate_normalized;
+	at::Tensor grad_output_gate_raw;
+	at::Tensor grad_new_cell_normalized;
+	at::Tensor grad_new_cell_raw;
+	at::Tensor grad_gate_fig_normalized;
+	at::Tensor grad_gate_fig_raw;
+	at::Tensor grad_X;
 
-	tanh_new_cells = 1 - tanh_new_cells.pow(2);
-
-	at::Tensor d_lnorm_tanh_new_cell;
-	at::Tensor d_norm_tanh_new_cell;
-	at::Tensor current_std_tanh_new_cell;
-	at::Tensor d_tanh_new_cell;
-	at::Tensor d_new_cell;
-	at::Tensor d_norm_gate;
-	at::Tensor d_norm_gate_ihc;
-	at::Tensor d_gate_ihc;
-	at::Tensor d_X_ihc;
-
-	stds_collection.slice(0, 0, 2) *= gate_size;
-	stds_collection[2] *= state_size_3;
-	stds_collection[3] *= state_size;
-	stds_collection.unsqueeze_(3);
-	const auto stds_ihc = stds_collection.slice(0, 0, 3);
-	const auto stds_tanh_new_cell = stds_collection[3];
-	auto sizes = at::zeros(stds_collection.type(), { 3, 1, 1 });
-	sizes.slice(0, 0, 2) = gate_size;
-	sizes[2] = state_size_3;
 	for (int i = (sequence_length - 1); i >= 0; i--)
 	{
-		grad_h += grad_output[i];
+		grad_hidden += grad_output[i];
 
-		d_lnorm_tanh_new_cell = grad_h * output_gates[i];
-		d_lnorm_tanh_new_cells[i] = d_lnorm_tanh_new_cell;
+		grad_gates_layer_normalized_o[i] *= grad_hidden;
 
-		d_norm_tanh_new_cell = d_lnorm_tanh_new_cell * gamma_tanh_cell;
+		grad_output_gate_normalized = grad_gates_layer_normalized_o[i] * gamma_o;
+		grad_output_gate_raw = (state_size * grad_output_gate_normalized
+								- grad_output_gate_normalized.sum(/*dim=*/1, /*keepdim=*/true)
+								- gates_o_normalized[i] * (grad_output_gate_normalized * gates_o_normalized[i]).sum(/*dim=*/1, /*keepdim=*/true)).div(gates_o_stds[i]);
+		grad_gates_raw_o[i] = grad_output_gate_raw;
 
-		d_tanh_new_cell = (state_size * d_norm_tanh_new_cell
-						   - d_norm_tanh_new_cell.sum(1, true)
-						   - norm_tanh_cells[i] * (d_norm_tanh_new_cell * norm_tanh_cells[i]).sum(1, true)) / stds_tanh_new_cell[i];
+		grad_cell += at::addcmul(grad_output_gate_raw * weight_co, grad_hidden, tanh_new_cells[i]);
+		grad_new_cells[i] = grad_cell;
 
-		d_new_cell = at::addcmul(grad_cell, d_tanh_new_cell, tanh_new_cells[i]);
+		grad_new_cell_normalized = grad_cell * gamma_new_cell;
+		grad_new_cell_raw = (state_size * grad_new_cell_normalized
+							 - grad_new_cell_normalized.sum(/*dim=*/1, /*keepdim=*/true)
+							 - new_cells_normalized[i] * (grad_new_cell_normalized * new_cells_normalized[i]).sum(/*dim=*/1, /*keepdim=*/true)).div(new_cells_stds[i]);
+		grad_gates_layer_normalized_fig[i] *= grad_new_cell_raw.unsqueeze(1);
 
-		d_norm_gate = at::cat({ d_new_cell, d_new_cell, grad_h, d_new_cell }, 1) * gates[i];
-		gates[i] = d_norm_gate;
+		grad_gate_fig_normalized = grad_gates_layer_normalized_fig[i] * gamma_fig;
 
-		d_norm_gate_ihc = d_norm_gate * gammas_ihc;
+		grad_gates_raw_fig[i] = (state_size * grad_gate_fig_normalized
+								 - grad_gate_fig_normalized.sum(/*dim=*/2, /*keepdim=*/true)
+								 - gates_fig_normalized[i] * (grad_gate_fig_normalized * gates_fig_normalized[i]).sum(/*dim=*/2, /*keepdim=*/true)).div(gates_fig_stds[i]);
 
-		d_gate_ihc = (sizes * d_norm_gate_ihc
-					  - d_norm_gate_ihc.sum(2, true)
-					  - norm_ihc.select(1, i) * (d_norm_gate_ihc * norm_ihc.select(1, i)).sum(2, true)) / stds_ihc.select(1, i);
-		d_gates_ihc.select(1, i) = d_gate_ihc;
+		grad_X = grad_gates_raw[i].view({ batch_size, gate_size }).mm(weights);
 
-		d_X_ihc = at::matmul(d_gate_ihc, weights);
-
-		grad_inputs[i] = d_X_ihc[0].slice(1, 0, input_size);
-		grad_h = d_X_ihc[1].slice(1, 0, state_size) * dropout_hidden[i];
-		grad_cell = at::addcmul(d_X_ihc[2].slice(1, 0, state_size), d_new_cell, forget_gates[i]);
+		grad_hidden = grad_X.slice(1, 0, state_size);
+		grad_cell = at::addcmul(grad_X.slice(1, state_size, state_size_2), forget_gates[i], grad_new_cell_raw);
+		grad_inputs[i] = grad_X.slice(1, state_size_2);
 	}
+	const auto flattened_grad_gates_raw = grad_gates_raw.view({ sequence_length * batch_size, gate_size });
+	const auto grad_weight_ih_hh = flattened_grad_gates_raw.t().mm(at::cat({ input, hiddens }, 2).view({ sequence_length * batch_size, input_size + state_size }));
+	const auto grad_weight_ch = at::cat({ flattened_grad_gates_raw.slice(1, 0, state_size_2),
+										  flattened_grad_gates_raw.slice(1, state_size_3) }, 1).mul(at::cat({ cells.slice(0, 0, sequence_length).repeat({ 1, 1, 2 }),
+																											  cells.slice(0, 1) }, 2).view({ sequence_length * batch_size, state_size_3 })).sum(/*dim=*/0, /*keepdim=*/false);
+	const auto grad_bias = grad_gates_layer_normalized.sum(/*dim=*/{ 0, 1 }, /*keepdim=*/false).flatten();
 
-	const auto grad_weights_ihc = at::matmul(d_gates_ihc.flatten(1, 2).transpose(1, 2), X.flatten(1, 2));
-	const auto grad_weight_ih = grad_weights_ihc[0].slice(1, 0, input_size);
-	const auto grad_weight_hh = grad_weights_ihc[1].slice(1, 0, state_size);
-	const auto grad_weight_ch = grad_weights_ihc[2].slice(0, 0, state_size_3).slice(1, 0, state_size);
+	const auto grad_gammas = grad_gates_layer_normalized.mul(at::cat({ gates_fig_normalized, gates_o_normalized.unsqueeze(2) }, 2)).sum(/*dim=*/{ 0, 1 }, /*keepdim=*/false);
 
-	const auto grad_bias = gates.sum({ 0, 1 });
+	const auto grad_gamma_new_cell = grad_new_cells.mul(new_cells_normalized).sum(/*dim=*/{ 0, 1 }, /*keepdim=*/false);
+	const auto grad_beta_new_cell = grad_new_cells.sum(/*dim=*/{ 0, 1 }, /*keepdim=*/false);
 
-	const auto grad_gammas_ihc = gates.mul(norm_ihc).sum({ 1, 2 });
-	const auto grad_gamma_ih = grad_gammas_ihc[0];
-	const auto grad_gamma_hh = grad_gammas_ihc[1];
-	const auto grad_gamma_ch = grad_gammas_ihc[2].slice(0, 0, state_size_3);
-	const auto grad_gamma_tanh_cell = d_lnorm_tanh_new_cells.mul(norm_tanh_cells).sum({ 0, 1 });
-
-	const auto grad_beta_tanh_cell = d_lnorm_tanh_new_cells.sum({ 0, 1 });
-
-	return { grad_h,
-			 grad_cell,
-			 grad_inputs,
-			 grad_weight_ih,
-			 grad_weight_hh,
+	return { grad_inputs,
+			 grad_weight_ih_hh.slice(1, 0, input_size).contiguous(),
+			 grad_weight_ih_hh.slice(1, input_size).contiguous(),
 			 grad_weight_ch,
 			 grad_bias,
-			 grad_gamma_ih,
-			 grad_gamma_hh,
-			 grad_gamma_ch,
-			 grad_gamma_tanh_cell,
-			 grad_beta_tanh_cell };
+			 grad_gammas[0],
+			 grad_gammas[1],
+			 grad_gammas[2],
+			 grad_gammas[3],
+			 grad_gamma_new_cell,
+			 grad_beta_new_cell,
+			 grad_hidden,
+			 grad_cell };
 }
 
 std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_forward(
@@ -304,41 +286,51 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_forward(
 	at::Tensor const &weight_hh,
 	at::Tensor const &weight_ch,
 	at::Tensor const &bias,
-	at::Tensor const &gamma_ih,
-	at::Tensor const &gamma_hh,
-	at::Tensor const &gamma_ch,
-	at::Tensor const &gamma_tanh_cell,
-	at::Tensor const &beta_tanh_cell,
+	at::Tensor const &gamma_f,
+	at::Tensor const &gamma_i,
+	at::Tensor const &gamma_g,
+	at::Tensor const &gamma_o,
+	at::Tensor const &gamma_new_cell,
+	at::Tensor const &beta_new_cell,
 	at::Tensor &hidden,
 	at::Tensor &cell,
 	double const &epsilon,
 	double const &dropout_p,
+	bool const &dropout_on_output,
 	bool const &training,
 	int64_t const &sequence_length,
 	int64_t const &batch_size,
 	int64_t const &input_size,
 	int64_t const &state_size,
+	int64_t const &state_size_2,
 	int64_t const &state_size_3,
 	int64_t const &gate_size);
 
 std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 	at::Tensor &grad_output,
-	at::Tensor &grad_h,
+	at::Tensor &grad_hidden,
 	at::Tensor &grad_cell,
-	at::Tensor const &norm_collection,
+	at::Tensor const &input,
+	at::Tensor const &hiddens,
+	at::Tensor const &cells,
+	at::Tensor const &gates_fig,
+	at::Tensor const &gates_fig_normalized,
+	at::Tensor &gates_fig_stds,
+	at::Tensor const &gates_o,
+	at::Tensor const &gates_o_normalized,
+	at::Tensor &gates_o_stds,
+	at::Tensor const &new_cells_normalized,
+	at::Tensor &new_cells_stds,
 	at::Tensor &tanh_new_cells,
-	at::Tensor const &lnorm_tanh_cells,
-	at::Tensor &stds_collection,
 	at::Tensor const &dropout,
-	at::Tensor &gates,
-	at::Tensor &X,
 	at::Tensor const &weight_ih,
 	at::Tensor const &weight_hh,
 	at::Tensor const &weight_ch,
-	at::Tensor const &gamma_ih,
-	at::Tensor const &gamma_hh,
-	at::Tensor const &gamma_ch,
-	at::Tensor const &gamma_tanh_cell);
+	at::Tensor const &gamma_f,
+	at::Tensor const &gamma_i,
+	at::Tensor const &gamma_g,
+	at::Tensor const &gamma_o,
+	at::Tensor const &gamma_new_cell);
 
 std::vector<at::Tensor> ln_peephole_lstm_layer_forward(
 	at::Tensor input,
@@ -346,26 +338,29 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_forward(
 	at::Tensor weight_hh,
 	at::Tensor weight_ch,
 	at::Tensor bias,
-	at::Tensor gamma_ih,
-	at::Tensor gamma_hh,
-	at::Tensor gamma_ch,
-	at::Tensor gamma_tanh_cell,
-	at::Tensor beta_tanh_cell,
+	at::Tensor gamma_f,
+	at::Tensor gamma_i,
+	at::Tensor gamma_g,
+	at::Tensor gamma_o,
+	at::Tensor gamma_new_cell,
+	at::Tensor beta_new_cell,
 	at::Tensor hidden,
 	at::Tensor cell,
 	double epsilon,
 	double dropout_p,
+	bool dropout_on_output,
 	bool training)
 {
 	// Input dimension check (Confusion with input dimensions are quite usual. Please keep this check.)
-	AT_ASSERTM(input.dim() == 3, "### The input tensor must have 3 dimensions, but the given tensor only has ", input.dim(), " dimensions ###");
+	AT_ASSERTM(input.dim() == 3, "### The input tensor must have 3 dimensions, but the given tensor only has ", input.dim(), " dimension(s) ###");
 
 	const auto sequence_length = input.size(0);
 	const auto batch_size = input.size(1);
 	const auto input_size = input.size(2);
 	const auto state_size = weight_ih.size(0) / 4;
+	const auto state_size_2 = state_size + state_size;
+	const auto state_size_3 = state_size_2 + state_size;
 	const auto gate_size = weight_ih.size(0);
-	const auto state_size_3 = gate_size - state_size;
 
 	// Hiddens check (Frequent problems. Please, keep these checks.)
 	AT_ASSERTM((hidden.dim() == 2) && (hidden.size(0) == batch_size) && (hidden.size(1) == state_size),
@@ -379,8 +374,8 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_forward(
 	// Device check (This part is important since this issue happens quite often)
 	bool use_cuda = input.is_cuda();
 	AT_ASSERTM((use_cuda == weight_ih.is_cuda()) && (use_cuda == weight_hh.is_cuda()) && (use_cuda == weight_ch.is_cuda())
-			   && (use_cuda == bias.is_cuda()) && (use_cuda == gamma_ih.is_cuda()) && (use_cuda == gamma_hh.is_cuda()) && (use_cuda == gamma_ch.is_cuda())
-			   && (use_cuda == gamma_tanh_cell.is_cuda()) && (use_cuda == beta_tanh_cell.is_cuda()) && (use_cuda == hidden.is_cuda()) && (use_cuda == cell.is_cuda()),
+			   && (use_cuda == bias.is_cuda()) && (use_cuda == gamma_f.is_cuda()) && (use_cuda == gamma_i.is_cuda()) && (use_cuda == gamma_g.is_cuda()) && (use_cuda == gamma_o.is_cuda())
+			   && (use_cuda == gamma_new_cell.is_cuda()) && (use_cuda == beta_new_cell.is_cuda()) && (use_cuda == hidden.is_cuda()) && (use_cuda == cell.is_cuda()),
 			   "### All tensors must be located in either CPU or CUDA devices together, but some of the given tensors are in a different device ###");
 
 	if (use_cuda)
@@ -391,76 +386,119 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_forward(
 		AT_ASSERTM(weight_hh.is_contiguous(), "### weight_hh tensor is not contiguous ###");
 		AT_ASSERTM(weight_ch.is_contiguous(), "### weight_ch tensor is not contiguous ###");
 		AT_ASSERTM(bias.is_contiguous(), "### bias tensor is not contiguous ###");
-		AT_ASSERTM(gamma_ih.is_contiguous(), "### gamma_ih tensor is not contiguous ###");
-		AT_ASSERTM(gamma_hh.is_contiguous(), "### gamma_hh tensor is not contiguous ###");
-		AT_ASSERTM(gamma_ch.is_contiguous(), "### gamma_ch tensor is not contiguous ###");
-		AT_ASSERTM(gamma_tanh_cell.is_contiguous(), "### gamma_tanh_cell tensor is not contiguous ###");
-		AT_ASSERTM(beta_tanh_cell.is_contiguous(), "### beta_tanh_cell tensor is not contiguous ###");
+		AT_ASSERTM(gamma_f.is_contiguous(), "### gamma_f tensor is not contiguous ###");
+		AT_ASSERTM(gamma_i.is_contiguous(), "### gamma_i tensor is not contiguous ###");
+		AT_ASSERTM(gamma_g.is_contiguous(), "### gamma_g tensor is not contiguous ###");
+		AT_ASSERTM(gamma_o.is_contiguous(), "### gamma_o tensor is not contiguous ###");
+		AT_ASSERTM(gamma_new_cell.is_contiguous(), "### gamma_new_cell tensor is not contiguous ###");
+		AT_ASSERTM(beta_new_cell.is_contiguous(), "### beta_new_cell tensor is not contiguous ###");
 		AT_ASSERTM(hidden.is_contiguous(), "### hidden tensor is not contiguous ###");
 		AT_ASSERTM(cell.is_contiguous(), "### cell tensor is not contiguous ###");
 
-		return ln_peephole_lstm_layer_cuda_forward(input, weight_ih, weight_hh, weight_ch, bias, gamma_ih, gamma_hh, gamma_ch, gamma_tanh_cell, beta_tanh_cell, hidden, cell, epsilon, dropout_p, training, sequence_length, batch_size, input_size, state_size, state_size_3, gate_size);
+		return ln_peephole_lstm_layer_cuda_forward(input,
+												   weight_ih, weight_hh, weight_ch, bias, gamma_f, gamma_i, gamma_g, gamma_o, gamma_new_cell, beta_new_cell,
+												   hidden, cell,
+												   epsilon, dropout_p, dropout_on_output, training,
+												   sequence_length, batch_size, input_size, state_size, state_size_2, state_size_3, gate_size);
 	}
 	else
 	{
-		return ln_peephole_lstm_layer_cpu_forward(input, weight_ih, weight_hh, weight_ch, bias, gamma_ih, gamma_hh, gamma_ch, gamma_tanh_cell, beta_tanh_cell, hidden, cell, epsilon, dropout_p, training, sequence_length, batch_size, input_size, state_size, state_size_3, gate_size);
+		return ln_peephole_lstm_layer_cpu_forward(input,
+												  weight_ih, weight_hh, weight_ch, bias, gamma_f, gamma_i, gamma_g, gamma_o, gamma_new_cell, beta_new_cell,
+												  hidden, cell,
+												  epsilon, dropout_p, dropout_on_output, training,
+												  sequence_length, batch_size, input_size, state_size, state_size_2, state_size_3, gate_size);
 	}
 }
 
 std::vector<at::Tensor> ln_peephole_lstm_layer_backward(
-	at::Tensor &grad_output,
-	at::Tensor &grad_h,
-	at::Tensor &grad_cell,
-	at::Tensor &norm_collection,
-	at::Tensor &tanh_new_cells,
-	at::Tensor &lnorm_tanh_cells,
-	at::Tensor &stds_collection,
-	at::Tensor &dropout,
-	at::Tensor &gates,
-	at::Tensor &X,
-	at::Tensor &weight_ih,
-	at::Tensor &weight_hh,
-	at::Tensor &weight_ch,
-	at::Tensor &gamma_ih,
-	at::Tensor &gamma_hh,
-	at::Tensor &gamma_ch,
-	at::Tensor &gamma_tanh_cell)
+	at::Tensor grad_output,
+	at::Tensor grad_hidden,
+	at::Tensor grad_cell,
+	at::Tensor input,
+	at::Tensor hiddens,
+	at::Tensor cells,
+	at::Tensor gates_fig,
+	at::Tensor gates_fig_normalized,
+	at::Tensor gates_fig_stds,
+	at::Tensor gates_o,
+	at::Tensor gates_o_normalized,
+	at::Tensor gates_o_stds,
+	at::Tensor new_cells_normalized,
+	at::Tensor new_cells_stds,
+	at::Tensor tanh_new_cells,
+	at::Tensor dropout,
+	at::Tensor weight_ih,
+	at::Tensor weight_hh,
+	at::Tensor weight_ch,
+	at::Tensor gamma_f,
+	at::Tensor gamma_i,
+	at::Tensor gamma_g,
+	at::Tensor gamma_o,
+	at::Tensor gamma_new_cell)
 {
 	// Not much checks since the values are saved during the forward pass and are supposed to be valid... just some device and contiguity checks
 	bool use_cuda = grad_output.is_cuda();
-	AT_ASSERTM((use_cuda == grad_h.is_cuda()) && (use_cuda == grad_cell.is_cuda()) && (use_cuda == tanh_new_cells.is_cuda()) && (use_cuda == dropout.is_cuda())
-			   && (use_cuda == gates.is_cuda()) && (use_cuda == X.is_cuda()) && (use_cuda == weight_ih.is_cuda()) && (use_cuda == weight_hh.is_cuda()) && (use_cuda == weight_ch.is_cuda())
-			   && (use_cuda == gamma_ih.is_cuda()) && (use_cuda == gamma_hh.is_cuda()) && (use_cuda == gamma_ch.is_cuda()) && (use_cuda == gamma_tanh_cell.is_cuda()),
+	AT_ASSERTM((use_cuda == grad_hidden.is_cuda()) && (use_cuda == grad_cell.is_cuda()) && (use_cuda == input.is_cuda()) && (use_cuda == hiddens.is_cuda()) && (use_cuda == cells.is_cuda())
+			   && (use_cuda == gates_fig.is_cuda()) && (use_cuda == gates_fig_normalized.is_cuda()) && (use_cuda == gates_fig_stds.is_cuda())
+			   && (use_cuda == gates_o.is_cuda()) && (use_cuda == gates_o_normalized.is_cuda()) && (use_cuda == gates_o_stds.is_cuda())
+			   && (use_cuda == new_cells_normalized.is_cuda()) && (use_cuda == new_cells_stds.is_cuda()) && (use_cuda == tanh_new_cells.is_cuda()) && (use_cuda == dropout.is_cuda())
+			   && (use_cuda == weight_ih.is_cuda()) && (use_cuda == weight_hh.is_cuda()) && (use_cuda == weight_ch.is_cuda())
+			   && (use_cuda == gamma_f.is_cuda()) && (use_cuda == gamma_i.is_cuda()) && (use_cuda == gamma_g.is_cuda()) && (use_cuda == gamma_o.is_cuda()) && (use_cuda == gamma_new_cell.is_cuda()),
 			   "### All tensors must be located in either CPU or CUDA devices together, but some of the given tensors are in a different device ###");
 
 	if (use_cuda)
 	{
 		// Contiguity check
 		AT_ASSERTM(grad_output.is_contiguous(), "### grad_output tensor is not contiguous ###");
-		AT_ASSERTM(grad_h.is_contiguous(), "### grad_h tensor is not contiguous ###");
+		AT_ASSERTM(grad_hidden.is_contiguous(), "### grad_h tensor is not contiguous ###");
 		AT_ASSERTM(grad_cell.is_contiguous(), "### grad_cell tensor is not contiguous ###");
+		AT_ASSERTM(input.is_contiguous(), "### input tensor is not contiguous ###");
+		AT_ASSERTM(hiddens.is_contiguous(), "### hiddens tensor is not contiguous ###");
+		AT_ASSERTM(cells.is_contiguous(), "### cells tensor is not contiguous ###");
+		AT_ASSERTM(gates_fig.is_contiguous(), "### gates_fig tensor is not contiguous ###");
+		AT_ASSERTM(gates_fig_normalized.is_contiguous(), "### gates_fig_normalized tensor is not contiguous ###");
+		AT_ASSERTM(gates_fig_stds.is_contiguous(), "### gates_fig_stds tensor is not contiguous ###");
+		AT_ASSERTM(gates_o.is_contiguous(), "### gates_o tensor is not contiguous ###");
+		AT_ASSERTM(gates_o_normalized.is_contiguous(), "### gates_o_normalized tensor is not contiguous ###");
+		AT_ASSERTM(gates_o_stds.is_contiguous(), "### gates_o_stds tensor is not contiguous ###");
+		AT_ASSERTM(new_cells_normalized.is_contiguous(), "### new_cells_normalized tensor is not contiguous ###");
+		AT_ASSERTM(new_cells_stds.is_contiguous(), "### new_cells_stds tensor is not contiguous ###");
 		AT_ASSERTM(tanh_new_cells.is_contiguous(), "### tanh_new_cells tensor is not contiguous ###");
 		AT_ASSERTM(dropout.is_contiguous(), "### dropout tensor is not contiguous ###");
-		AT_ASSERTM(gates.is_contiguous(), "### gates tensor is not contiguous ###");
-		AT_ASSERTM(X.is_contiguous(), "### X tensor is not contiguous ###");
 		AT_ASSERTM(weight_ih.is_contiguous(), "### weight_ih tensor is not contiguous ###");
 		AT_ASSERTM(weight_hh.is_contiguous(), "### weight_ih tensor is not contiguous ###");
 		AT_ASSERTM(weight_ch.is_contiguous(), "### weight_ih tensor is not contiguous ###");
-		AT_ASSERTM(gamma_ih.is_contiguous(), "### gamma_ih tensor is not contiguous ###");
-		AT_ASSERTM(gamma_hh.is_contiguous(), "### gamma_hh tensor is not contiguous ###");
-		AT_ASSERTM(gamma_ch.is_contiguous(), "### gamma_ch tensor is not contiguous ###");
-		AT_ASSERTM(gamma_tanh_cell.is_contiguous(), "### gamma_tanh_cell tensor is not contiguous ###");
+		AT_ASSERTM(gamma_f.is_contiguous(), "### gamma_f tensor is not contiguous ###");
+		AT_ASSERTM(gamma_i.is_contiguous(), "### gamma_i tensor is not contiguous ###");
+		AT_ASSERTM(gamma_g.is_contiguous(), "### gamma_g tensor is not contiguous ###");
+		AT_ASSERTM(gamma_o.is_contiguous(), "### gamma_o tensor is not contiguous ###");
+		AT_ASSERTM(gamma_new_cell.is_contiguous(), "### gamma_tanh_cell tensor is not contiguous ###");
 
-		return ln_peephole_lstm_layer_cuda_backward(grad_output, grad_h, grad_cell, norm_collection, tanh_new_cells, lnorm_tanh_cells, stds_collection, dropout, gates, X, weight_ih, weight_hh, weight_ch, gamma_ih, gamma_hh, gamma_ch, gamma_tanh_cell);
+		return ln_peephole_lstm_layer_cuda_backward(grad_output, grad_hidden, grad_cell,
+													input, hiddens, cells,
+													gates_fig, gates_fig_normalized, gates_fig_stds,
+													gates_o, gates_o_normalized, gates_o_stds,
+													new_cells_normalized, new_cells_stds,
+													tanh_new_cells,
+													dropout,
+													weight_ih, weight_hh, weight_ch, gamma_f, gamma_i, gamma_g, gamma_o, gamma_new_cell);
 	}
 	else
 	{
-		return ln_peephole_lstm_layer_cpu_backward(grad_output, grad_h, grad_cell, norm_collection, tanh_new_cells, lnorm_tanh_cells, stds_collection, dropout, gates, X, weight_ih, weight_hh, weight_ch, gamma_ih, gamma_hh, gamma_ch, gamma_tanh_cell);
+		return ln_peephole_lstm_layer_cpu_backward(grad_output, grad_hidden, grad_cell,
+												   input, hiddens, cells,
+												   gates_fig, gates_fig_normalized, gates_fig_stds,
+												   gates_o, gates_o_normalized, gates_o_stds,
+												   new_cells_normalized, new_cells_stds,
+												   tanh_new_cells,
+												   dropout,
+												   weight_ih, weight_hh, weight_ch, gamma_f, gamma_i, gamma_g, gamma_o, gamma_new_cell);
 	}
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
-	m.def("forward", &ln_peephole_lstm_layer_forward, "LN Peephole LSTM layer forward");
-	m.def("backward", &ln_peephole_lstm_layer_backward, "LN Peephole LSTM layer backward");
+	m.def("forward", &ln_peephole_lstm_layer_forward, "LN Peephole LSTM layer forward (CUDA)");
+	m.def("backward", &ln_peephole_lstm_layer_backward, "LN Peephole LSTM layer backward (CUDA)");
 }
