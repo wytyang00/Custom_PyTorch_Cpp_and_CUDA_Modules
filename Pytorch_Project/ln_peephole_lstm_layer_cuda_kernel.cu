@@ -14,8 +14,34 @@ __device__ __forceinline__ scalar_t sigmoid(scalar_t const &z)
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t tanh(scalar_t const &z)
 {
-	auto exp_n2z = exp(-2 * z);
+	const auto exp_n2z = exp(-2 * z);
 	return (1.0 - exp_n2z) / (1.0 + exp_n2z);
+}
+/*
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t d_sigmoid(scalar_t const &z)
+{
+	const auto exp_nz = exp(-z);
+	return exp_nz / pow((1.0 + exp_nz), 2);
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t d_tanh(scalar_t const &z)
+{
+	const auto exp_n2z = exp(-2 * z);
+	return 4 * exp_n2z / pow((1.0 + exp_n2z), 2);
+}
+*/
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t d_sigmoid_with_output(scalar_t const &a)
+{
+	return a * (1.0 - a);
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t d_tanh_with_output(scalar_t const &a)
+{
+	return 1.0 - (a * a);
 }
 
 template <typename scalar_t>
@@ -387,18 +413,6 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_forward(
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <typename scalar_t>
-__device__ __forceinline__ scalar_t d_sigmoid_with_output(scalar_t const &a)
-{
-	return a * (1.0 - a);
-}
-
-template <typename scalar_t>
-__device__ __forceinline__ scalar_t d_tanh_with_output(scalar_t const &a)
-{
-	return 1.0 - (a * a);
-}
-
-template <typename scalar_t>
 __global__ void backward_preparation(
 	scalar_t* __restrict__ grad_output,
 	const scalar_t* __restrict__ dropout_output,
@@ -412,6 +426,7 @@ __global__ void backward_preparation(
 	scalar_t* __restrict__ new_cells_stds,
 	const scalar_t* __restrict__ tanh_new_cells,
 	scalar_t* __restrict__ grad_new_cells_wrt_tanh_new_cell,
+	scalar_t* __restrict__ forget_gates,
 	const size_t n_total_batches,
 	const size_t state_size,
 	const size_t state_size_2,
@@ -429,9 +444,12 @@ __global__ void backward_preparation(
 			{
 				if (process_idx == 0)
 				{
+					const int cell_forget_idx = batch * state_size + column;
+					const scalar_t forget_gate_val = gates_fig[batch * state_size_3 + column];
+					forget_gates[cell_forget_idx] = forget_gate_val;
 					grad_gates_layer_normalized[batch * gate_size + column]
-						= cells[batch * state_size + column]
-						* d_sigmoid_with_output(gates_fig[batch * state_size_3 + column]);
+						= cells[cell_forget_idx]
+						* d_sigmoid_with_output(forget_gate_val);
 					if (column == 0)
 					{
 						gates_fig_stds[batch * 3] *= state_size;
@@ -725,6 +743,72 @@ __global__ void backward_final(
 			if (process_idx < 13)
 			{
 				const int store_idx = batch * (gate_size * 3 + state_size) + process_idx * state_size + column;
+				/*if (process_idx == 0)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_raw[batch * gate_size + column] * cells[batch * state_size + column];
+				}
+				else{
+				if (process_idx == 1)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_raw[batch * gate_size + column + state_size] * cells[batch * state_size + column];
+				}
+				else{
+				if (process_idx == 2)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_raw[batch * gate_size + column + state_size_3] * cells[(batch + batch_size) * state_size + column];
+				}
+				else{
+				if (process_idx == 3)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column];
+				}
+				else{
+				if (process_idx == 4)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column + state_size];
+				}
+				else{
+				if (process_idx == 5)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column + state_size_2];
+				}
+				else{
+				if (process_idx == 6)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column + state_size_3];
+				}
+				else{
+				if (process_idx == 7)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column] * gates_fig_normalized[batch * state_size_3 + column];
+				}
+				else{
+				if (process_idx == 8)
+				{
+					const int norm_idx = batch * state_size_3 + column + state_size;
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[norm_idx + batch * state_size] * gates_fig_normalized[norm_idx];
+				}
+				else{
+				if (process_idx == 9)
+				{
+					const int norm_idx = batch * state_size_3 + column + state_size_2;
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[norm_idx + batch * state_size] * gates_fig_normalized[norm_idx];
+				}
+				else{
+				if (process_idx == 10)
+				{
+					const int norm_idx = batch * state_size + column;
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[norm_idx + (batch + 1) * state_size_3] * gates_o_normalized[norm_idx];
+				}
+				else{
+				if (process_idx == 11)
+				{
+					sum_to_get_grads[store_idx] = grad_new_cells[batch * state_size + column] * new_cells_normalized[batch * state_size + column];
+				}
+				else
+				{
+					sum_to_get_grads[store_idx] = grad_new_cells[batch * state_size + column];
+				}}}}}}}}}}}}*/
 				switch (process_idx)
 				{
 				case 0:
@@ -857,6 +941,7 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 
 	auto grad_output_gate_normalized = at::empty({ batch_size, state_size }, grad_gates_raw.options());
 	auto grad_fig_gate_normalized = at::empty({ batch_size, 3, state_size }, grad_gates_raw.options());
+	auto forget_gates = at::empty_like(tanh_new_cells);
 
 	at::Tensor sum_to_get_grads;
 
@@ -889,13 +974,12 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 			new_cells_stds.data<scalar_t>(),
 			tanh_new_cells.data<scalar_t>(),
 			grad_new_cells_wrt_tanh_new_cell.data<scalar_t>(),
+			forget_gates.data<scalar_t>(),
 			n_total_batches,
 			state_size,
 			state_size_2,
 			state_size_3,
 			gate_size);
-		
-		const auto forget_gates = gates_fig.select(2, 0).clone();
 
 		for (int i = sequence_length - 1; i >= 0; i--)
 		{
