@@ -426,7 +426,6 @@ __global__ void backward_preparation(
 	scalar_t* __restrict__ new_cells_stds,
 	const scalar_t* __restrict__ tanh_new_cells,
 	scalar_t* __restrict__ grad_new_cells_wrt_tanh_new_cell,
-	scalar_t* __restrict__ forget_gates,
 	const size_t n_total_batches,
 	const size_t state_size,
 	const size_t state_size_2,
@@ -444,12 +443,9 @@ __global__ void backward_preparation(
 			{
 				if (process_idx == 0)
 				{
-					const int cell_forget_idx = batch * state_size + column;
-					const scalar_t forget_gate_val = gates_fig[batch * state_size_3 + column];
-					forget_gates[cell_forget_idx] = forget_gate_val;
 					grad_gates_layer_normalized[batch * gate_size + column]
-						= cells[cell_forget_idx]
-						* d_sigmoid_with_output(forget_gate_val);
+						= cells[batch * state_size + column]
+						* d_sigmoid_with_output(gates_fig[batch * state_size_3 + column]);
 					if (column == 0)
 					{
 						gates_fig_stds[batch * 3] *= state_size;
@@ -521,6 +517,7 @@ __global__ void backward_loop_part_0(
 	scalar_t* __restrict__ grad_gate_layer_normalized,
 	const scalar_t* __restrict__ gamma_o,
 	scalar_t* __restrict__ grad_output_gate_normalized,
+	const scalar_t* __restrict__ output_gate_normalized,
 	const size_t batch_size,
 	const size_t state_size,
 	const size_t state_size_3)
@@ -539,6 +536,7 @@ __global__ void backward_loop_part_0(
 			grad_gate_layer_normalized[gate_idx] = grad_val;
 			grad_val *= gamma_o[column];
 			grad_output_gate_normalized[local_state_idx] = grad_val;
+			grad_output_gate_normalized[batch_size * state_size + local_state_idx] = grad_val * output_gate_normalized[local_state_idx];
 		}
 	}
 }
@@ -546,8 +544,8 @@ __global__ void backward_loop_part_0(
 template <typename scalar_t>
 __global__ void backward_loop_part_1(
 	const scalar_t* __restrict__ grad_output_gate_normalized,
-	const scalar_t* __restrict__ grad_output_gate_normalized_sum,
-	const scalar_t* __restrict__ grad_output_gate_normalized_prod_sum,
+	const scalar_t* __restrict__ grad_output_gate_normalized_sums,
+	//const scalar_t* __restrict__ grad_output_gate_normalized_prod_sum,
 	const scalar_t* __restrict__ output_gate_normalized,
 	const scalar_t* __restrict__ output_gate_std,
 	scalar_t* __restrict__ grad_gate_raw,
@@ -555,6 +553,8 @@ __global__ void backward_loop_part_1(
 	const scalar_t* __restrict__ grad_new_cell_wrt_tanh_new_cell,
 	scalar_t* __restrict__ grad_cell,
 	scalar_t* __restrict__ grad_new_cell,
+	scalar_t* __restrict__ grad_new_cell_normalized,
+	const scalar_t* __restrict__ new_cell_normalized,
 	const scalar_t* __restrict__ gamma_new_cell,
 	const size_t batch_size,
 	const size_t state_size,
@@ -569,12 +569,15 @@ __global__ void backward_loop_part_1(
 			const int local_state_idx = batch * state_size + column;
 			const int gate_idx = local_state_idx + (batch + 1) * state_size_3;
 			scalar_t grad_val = (state_size * grad_output_gate_normalized[local_state_idx]
-								 - grad_output_gate_normalized_sum[batch]
-								 - output_gate_normalized[local_state_idx] * grad_output_gate_normalized_prod_sum[batch]) / output_gate_std[batch];
+								 - grad_output_gate_normalized_sums[batch]
+								 - output_gate_normalized[local_state_idx] * grad_output_gate_normalized_sums[batch_size + batch]) / output_gate_std[batch];
 			grad_gate_raw[gate_idx] = grad_val;
 			grad_val = grad_val * weight_co[column] + grad_new_cell_wrt_tanh_new_cell[local_state_idx] + grad_cell[local_state_idx];
 			grad_new_cell[local_state_idx] = grad_val;
-			grad_cell[local_state_idx] = grad_val * gamma_new_cell[column];
+			grad_val *= gamma_new_cell[column];
+			grad_cell[local_state_idx] = grad_val;
+			grad_new_cell_normalized[local_state_idx] = grad_val;
+			grad_new_cell_normalized[batch_size * state_size + local_state_idx] = grad_val * new_cell_normalized[local_state_idx];
 		}
 	}
 }
@@ -582,8 +585,8 @@ __global__ void backward_loop_part_1(
 template <typename scalar_t>
 __global__ void backward_loop_part_2(
 	scalar_t* __restrict__ grad_cell,
-	const scalar_t* __restrict__ grad_cell_sum,
-	const scalar_t* __restrict__ grad_cell_prod_sum,
+	const scalar_t* __restrict__ grad_cell_sums,
+	//const scalar_t* __restrict__ grad_cell_prod_sum,
 	const scalar_t* __restrict__ new_cell_normalized,
 	const scalar_t* __restrict__ new_cell_std,
 	const size_t batch_size,
@@ -597,8 +600,8 @@ __global__ void backward_loop_part_2(
 		{
 			const int local_state_idx = batch * state_size + column;
 			grad_cell[local_state_idx] = (state_size * grad_cell[local_state_idx]
-									      - grad_cell_sum[batch]
-								          - new_cell_normalized[local_state_idx] * grad_cell_prod_sum[batch]) / new_cell_std[batch];
+									      - grad_cell_sums[batch]
+								          - new_cell_normalized[local_state_idx] * grad_cell_sums[batch_size + batch]) / new_cell_std[batch];
 		}
 	}
 }
@@ -611,6 +614,7 @@ __global__ void backward_loop_part_3(
 	const scalar_t* __restrict__ gamma_i,
 	const scalar_t* __restrict__ gamma_g,
 	scalar_t* __restrict__ grad_fig_gate_normalized,
+	const scalar_t* __restrict__ fig_gate_normalized,
 	const size_t batch_size,
 	const size_t state_size,
 	const size_t state_size_3)
@@ -642,6 +646,7 @@ __global__ void backward_loop_part_3(
 					grad_val *= gamma_g[column];
 				}}
 				grad_fig_gate_normalized[fig_idx] = grad_val;
+				grad_fig_gate_normalized[batch_size * state_size_3 + fig_idx] = grad_val * fig_gate_normalized[fig_idx];
 			}
 		}
 	}
@@ -650,8 +655,8 @@ __global__ void backward_loop_part_3(
 template <typename scalar_t>
 __global__ void backward_loop_part_4(
 	const scalar_t* __restrict__ grad_fig_gate_normalized,
-	const scalar_t* __restrict__ grad_fig_gate_normalized_sum,
-	const scalar_t* __restrict__ grad_fig_gate_normalized_prod_sum,
+	const scalar_t* __restrict__ grad_fig_gate_normalized_sums,
+	//const scalar_t* __restrict__ grad_fig_gate_normalized_prod_sum,
 	const scalar_t* __restrict__ gate_fig_normalized,
 	const scalar_t* __restrict__ gate_fig_std,
 	scalar_t* __restrict__ grad_gate_raw,
@@ -671,8 +676,8 @@ __global__ void backward_loop_part_4(
 				const int fig_idx = batch * state_size_3 + process_idx * state_size + column;
 				const int reduced_fig_idx = batch * 3 + process_idx;
 				scalar_t grad_val = (state_size * grad_fig_gate_normalized[fig_idx]
-									 - grad_fig_gate_normalized_sum[reduced_fig_idx]
-									 - gate_fig_normalized[fig_idx] * grad_fig_gate_normalized_prod_sum[reduced_fig_idx]) / gate_fig_std[reduced_fig_idx];
+									 - grad_fig_gate_normalized_sums[reduced_fig_idx]
+									 - gate_fig_normalized[fig_idx] * grad_fig_gate_normalized_sums[batch_size * 3 + reduced_fig_idx]) / gate_fig_std[reduced_fig_idx];
 				grad_gate_raw[fig_idx + batch * state_size] = grad_val;
 			}
 		}
@@ -939,9 +944,9 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 	auto grad_new_cells = at::empty_like(tanh_new_cells);
 	auto grad_new_cells_wrt_tanh_new_cell = at::empty_like(tanh_new_cells);
 
-	auto grad_output_gate_normalized = at::empty({ batch_size, state_size }, grad_gates_raw.options());
-	auto grad_fig_gate_normalized = at::empty({ batch_size, 3, state_size }, grad_gates_raw.options());
-	auto forget_gates = at::empty_like(tanh_new_cells);
+	auto grad_output_gate_normalized = at::empty({ batch_size * 2, state_size }, grad_gates_raw.options());
+	auto grad_new_cell_normalized = at::empty({ batch_size * 2, state_size }, grad_cell.options());
+	auto grad_fig_gate_normalized = at::empty({ batch_size * 2, 3, state_size }, grad_gates_raw.options());
 
 	at::Tensor sum_to_get_grads;
 
@@ -974,12 +979,13 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 			new_cells_stds.data<scalar_t>(),
 			tanh_new_cells.data<scalar_t>(),
 			grad_new_cells_wrt_tanh_new_cell.data<scalar_t>(),
-			forget_gates.data<scalar_t>(),
 			n_total_batches,
 			state_size,
 			state_size_2,
 			state_size_3,
 			gate_size);
+
+		const auto forget_gates = gates_fig.select(2, 0).clone();
 
 		for (int i = sequence_length - 1; i >= 0; i--)
 		{
@@ -990,6 +996,7 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 				grad_gates_layer_normalized[i].data<scalar_t>(),
 				gamma_o.data<scalar_t>(),
 				grad_output_gate_normalized.data<scalar_t>(),
+				gates_o_normalized[i].data<scalar_t>(),
 				batch_size,
 				state_size,
 				state_size_3);
@@ -997,7 +1004,7 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 			backward_loop_part_1<scalar_t> <<<blocks_1, threads>>> (
 				grad_output_gate_normalized.data<scalar_t>(),
 				grad_output_gate_normalized.sum(/*dim=*/1, /*keepdim=*/false).data<scalar_t>(),
-				grad_output_gate_normalized.mul(gates_o_normalized[i]).sum(/*dim=*/1, /*keepdim=*/false).data<scalar_t>(),
+				//grad_output_gate_normalized.mul(gates_o_normalized[i]).sum(/*dim=*/1, /*keepdim=*/false).data<scalar_t>(),
 				gates_o_normalized[i].data<scalar_t>(),
 				gates_o_stds[i].data<scalar_t>(),
 				grad_gates_raw[i].data<scalar_t>(),
@@ -1005,6 +1012,8 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 				grad_new_cells_wrt_tanh_new_cell[i].data<scalar_t>(),
 				grad_cell.data<scalar_t>(),
 				grad_new_cells[i].data<scalar_t>(),
+				grad_new_cell_normalized.data<scalar_t>(),
+				new_cells_normalized[i].data<scalar_t>(),
 				gamma_new_cell.data<scalar_t>(),
 				batch_size,
 				state_size,
@@ -1012,8 +1021,9 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 
 			backward_loop_part_2<scalar_t> <<<blocks_1, threads>>> (
 				grad_cell.data<scalar_t>(),
-				grad_cell.sum(/*dim=*/1, /*keepdim=*/false).data<scalar_t>(),
-				grad_cell.mul(new_cells_normalized[i]).sum(/*dim=*/1, /*keepdim=*/false).data<scalar_t>(),
+				grad_new_cell_normalized.sum(/*dim=*/1, /*keepdim=*/false).data<scalar_t>(),
+				//grad_cell.sum(/*dim=*/1, /*keepdim=*/false).data<scalar_t>(),
+				//grad_cell.mul(new_cells_normalized[i]).sum(/*dim=*/1, /*keepdim=*/false).data<scalar_t>(),
 				new_cells_normalized[i].data<scalar_t>(),
 				new_cells_stds[i].data<scalar_t>(),
 				batch_size,
@@ -1026,6 +1036,7 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 				gamma_i.data<scalar_t>(),
 				gamma_g.data<scalar_t>(),
 				grad_fig_gate_normalized.data<scalar_t>(),
+				gates_fig_normalized[i].data<scalar_t>(),
 				batch_size,
 				state_size,
 				state_size_3);
@@ -1033,7 +1044,7 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 			backward_loop_part_4<scalar_t> <<<blocks_2, threads>>> (
 				grad_fig_gate_normalized.data<scalar_t>(),
 				grad_fig_gate_normalized.sum(/*dim=*/2, /*keepdim=*/false).data<scalar_t>(),
-				grad_fig_gate_normalized.mul(gates_fig_normalized[i]).sum(/*dim=*/2, /*keepdim=*/false).data<scalar_t>(),
+				//grad_fig_gate_normalized.mul(gates_fig_normalized[i]).sum(/*dim=*/2, /*keepdim=*/false).data<scalar_t>(),
 				gates_fig_normalized[i].data<scalar_t>(),
 				gates_fig_stds[i].data<scalar_t>(),
 				grad_gates_raw[i].data<scalar_t>(),
