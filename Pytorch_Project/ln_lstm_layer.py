@@ -46,6 +46,7 @@ class LNPeepholeLSTMFunction(torch.autograd.Function):
                 None, None,
                 None, None)
 
+
 class LNPeepholeLSTM(nn.Module):
     def __init__(self, input_size, hidden_size, batch_first=False, dropout=0., dropout_on_output=True, eps=1e-05):
         if not 0 <= dropout <= 1:

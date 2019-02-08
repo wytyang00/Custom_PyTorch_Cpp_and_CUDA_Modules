@@ -17,7 +17,7 @@ __device__ __forceinline__ scalar_t tanh(scalar_t const &z)
 	const auto exp_n2z = exp(-2 * z);
 	return (1.0 - exp_n2z) / (1.0 + exp_n2z);
 }
-/*
+
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t d_sigmoid(scalar_t const &z)
 {
@@ -31,7 +31,7 @@ __device__ __forceinline__ scalar_t d_tanh(scalar_t const &z)
 	const auto exp_n2z = exp(-2 * z);
 	return 4 * exp_n2z / pow((1.0 + exp_n2z), 2);
 }
-*/
+/*
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t d_sigmoid_with_output(scalar_t const &a)
 {
@@ -43,7 +43,7 @@ __device__ __forceinline__ scalar_t d_tanh_with_output(scalar_t const &a)
 {
 	return 1.0 - (a * a);
 }
-
+*/
 template <typename scalar_t>
 __global__ void forward_part_0(
 	const scalar_t* __restrict__ hidden,
@@ -58,7 +58,6 @@ __global__ void forward_part_0(
 	scalar_t* __restrict__ normalized_storage,
 	const scalar_t* __restrict__ gamma_fig,
 	const scalar_t* __restrict__ bias_fig,
-	scalar_t* __restrict__ activated_storage,
 	scalar_t* __restrict__ forgotten_cell,
 	const scalar_t* __restrict__ dropout_candidate_cell,
 	const int64_t batch_size,
@@ -95,13 +94,11 @@ __global__ void forward_part_0(
 							const int local_state_idx = batch * state_size + column;
 							forgotten_cell[local_state_idx] = gate_val * cell[local_state_idx];
 						}
-						activated_storage[gate_val_storage_idx] = gate_val;
 						current_gate[gate_val_local_idx] = gate_val;
 					}
 					else //candidate cell
 					{
 						gate_val = tanh((gate_val * gamma_fig[gamma_bias_idx]) + bias_fig[gamma_bias_idx]);
-						activated_storage[gate_val_storage_idx] = gate_val;
 						current_gate[gate_val_local_idx] = gate_val * dropout_candidate_cell[batch * state_size + column];
 					}
 				}
@@ -188,9 +185,7 @@ __global__ void forward_part_3(
 	scalar_t* __restrict__ output_gate_normalized_storage,
 	const scalar_t* __restrict__ gamma_o,
 	const scalar_t* __restrict__ bias_o,
-	scalar_t* __restrict__ output_gate_activated_storage,
 	const scalar_t* __restrict__ cell,
-	scalar_t* __restrict__ tanh_new_cell_storage,
 	scalar_t* __restrict__ hidden,
 	scalar_t* __restrict__ hc,
 	scalar_t* __restrict__ outputs,
@@ -216,10 +211,7 @@ __global__ void forward_part_3(
 			scalar_t output_gate_val = (current_gate[output_gate_idx] - mean[batch]) / std;
 			output_gate_normalized_storage[state_and_output_gate_storage_idx] = output_gate_val;
 			output_gate_val = sigmoid((output_gate_val * gamma_o[column]) + bias_o[column]);
-			output_gate_activated_storage[state_and_output_gate_storage_idx] = output_gate_val;
-			const scalar_t tanh_cell = tanh(cell[state_and_output_gate_storage_idx]);
-			tanh_new_cell_storage[state_and_output_gate_storage_idx] = tanh_cell;
-			const scalar_t hidden_val = output_gate_val * tanh_cell;
+			const scalar_t hidden_val = output_gate_val * tanh(cell[state_and_output_gate_storage_idx]);
 			hidden[state_and_output_gate_storage_idx] = hidden_val;
 			hc[hc_idx] = hidden_val;
 			outputs[state_and_output_gate_storage_idx] = hidden_val * dropout_output[state_and_output_gate_storage_idx];
@@ -418,13 +410,18 @@ __global__ void backward_preparation(
 	const scalar_t* __restrict__ dropout_output,
 	const scalar_t* __restrict__ dropout_candidate_cell,
 	const scalar_t* __restrict__ cells,
-	const scalar_t* __restrict__ gates_fig,
-	const scalar_t* __restrict__ gates_o,
+	const scalar_t* __restrict__ gates_fig_normalized,
+	const scalar_t* __restrict__ gates_o_normalized,
+	const scalar_t* __restrict__ bias,
+	const scalar_t* __restrict__ gamma_f,
+	const scalar_t* __restrict__ gamma_i,
+	const scalar_t* __restrict__ gamma_g,
+	const scalar_t* __restrict__ gamma_o,
+	scalar_t* __restrict__ forget_gates,
 	scalar_t* __restrict__ grad_gates_layer_normalized,
 	scalar_t* __restrict__ gates_fig_stds,
 	scalar_t* __restrict__ gates_o_stds,
 	scalar_t* __restrict__ new_cells_stds,
-	const scalar_t* __restrict__ tanh_new_cells,
 	scalar_t* __restrict__ grad_new_cells_wrt_tanh_new_cell,
 	const int64_t n_total_batches,
 	const int64_t state_size,
@@ -443,9 +440,11 @@ __global__ void backward_preparation(
 			{
 				if (process_idx == 0)
 				{
+					const scalar_t forget_gate_val = sigmoid(gates_fig_normalized[batch * state_size_3 + column] * gamma_f[column] + bias[column]);
+					forget_gates[batch * state_size + column] = forget_gate_val;
 					grad_gates_layer_normalized[batch * gate_size + column]
 						= cells[batch * state_size + column]
-						* d_sigmoid_with_output(gates_fig[batch * state_size_3 + column]);
+						* d_sigmoid_with_output(forget_gate_val);
 					if (column == 0)
 					{
 						gates_fig_stds[batch * 3] *= state_size;
@@ -457,8 +456,8 @@ __global__ void backward_preparation(
 					const int candidate_cell_idx = dropout_idx + (batch + 1) * state_size_2;
 					const int input_gate_idx = candidate_cell_idx - state_size;
 					const int store_idx = input_gate_idx + batch * state_size;
-					grad_gates_layer_normalized[store_idx] = gates_fig[candidate_cell_idx]
-						                                     * d_sigmoid_with_output(gates_fig[input_gate_idx])
+					grad_gates_layer_normalized[store_idx] = tanh(gates_fig_normalized[candidate_cell_idx] * gamma_g[column] + bias[column + state_size_2])
+						                                     * d_sigmoid(gates_fig_normalized[input_gate_idx] * gamma_i[column] + bias[column + state_size])
 						                                     * dropout_candidate_cell[dropout_idx];
 					if (column == 0)
 					{
@@ -471,8 +470,8 @@ __global__ void backward_preparation(
 					const int candidate_cell_idx = dropout_idx + (batch + 1) * state_size_2;
 					const int input_gate_idx = candidate_cell_idx - state_size;
 					const int store_idx = candidate_cell_idx + batch * state_size;
-					grad_gates_layer_normalized[store_idx] = gates_fig[input_gate_idx]
-						                                     * d_tanh_with_output(gates_fig[candidate_cell_idx])
+					grad_gates_layer_normalized[store_idx] = sigmoid(gates_fig_normalized[input_gate_idx] * gamma_i[column] + bias[column + state_size])
+						                                     * d_tanh(gates_fig_normalized[candidate_cell_idx] * gamma_g[column] + bias[column + state_size_2])
 						                                     * dropout_candidate_cell[dropout_idx];
 					if (column == 0)
 					{
@@ -481,10 +480,10 @@ __global__ void backward_preparation(
 				}
 				else{if (process_idx == 3)
 				{
-					const int tanh_and_output_idx = batch * state_size + column;
+					const int cell_and_output_idx = batch * state_size + column;
 					grad_gates_layer_normalized[batch * gate_size + column + state_size_3]
-						= tanh_new_cells[tanh_and_output_idx]
-						* d_sigmoid_with_output(gates_o[tanh_and_output_idx]);
+						= tanh(cells[cell_and_output_idx])
+						* d_sigmoid(gates_o_normalized[cell_and_output_idx] * gamma_o[column] + bias[column + state_size_3]);
 					if (column == 0)
 					{
 						gates_o_stds[batch] *= state_size;
@@ -502,7 +501,7 @@ __global__ void backward_preparation(
 				else{if (process_idx == 5)
 				{
 					const int index = batch * state_size + column;
-					grad_new_cells_wrt_tanh_new_cell[index] = d_tanh_with_output(tanh_new_cells[index]) * gates_o[index];
+					grad_new_cells_wrt_tanh_new_cell[index] = d_tanh(cells[cell_and_output_idx]) * sigmoid(gates_o_normalized[index] * gamma_o[column] + bias[column + state_size_3]);
 				}}}}}}
 			}
 		}
@@ -894,19 +893,17 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 	at::Tensor const &input,
 	at::Tensor const &hiddens,
 	at::Tensor const &cells,
-	at::Tensor const &gates_fig,
 	at::Tensor const &gates_fig_normalized,
 	at::Tensor &gates_fig_stds,
-	at::Tensor const &gates_o,
 	at::Tensor const &gates_o_normalized,
 	at::Tensor &gates_o_stds,
 	at::Tensor const &new_cells_normalized,
 	at::Tensor &new_cells_stds,
-	at::Tensor &tanh_new_cells,
 	at::Tensor const &dropout,
 	at::Tensor const &weight_ih,
 	at::Tensor const &weight_hh,
 	at::Tensor const &weight_ch,
+	at::Tensor const &bias,
 	at::Tensor const &gamma_f,
 	at::Tensor const &gamma_i,
 	at::Tensor const &gamma_g,
@@ -927,8 +924,6 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 	const auto dropout_candidate_cell = dropout[0];
 	const auto dropout_output = dropout[1];
 
-	const auto forget_gates = gates_fig.select(2, 0).clone();
-
 	const auto weights = at::cat({ weight_hh,
 								   at::cat({ weight_ch.slice(0, 0, state_size).diag(),
 											 weight_ch.slice(0, state_size, state_size_2).diag(),
@@ -938,11 +933,12 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 
 	auto grad_input = at::empty_like(input);
 
-	auto grad_gates_layer_normalized = at::empty({ sequence_length, batch_size, gate_size }, gates_fig.options());
+	auto grad_gates_layer_normalized = at::empty({ sequence_length, batch_size, gate_size }, gates_fig_normalized.options());
 	auto grad_gates_raw = at::empty_like(grad_gates_layer_normalized);
-	auto grad_new_cells = at::empty_like(tanh_new_cells);
-	auto grad_new_cells_wrt_tanh_new_cell = at::empty_like(tanh_new_cells);
+	auto grad_new_cells = at::empty_like(gates_o_normalized);
+	auto grad_new_cells_wrt_tanh_new_cell = at::empty_like(gates_o_normalized);
 
+	auto forget_gates = at::empty({ sequence_length, batch_size, state_size }, gates_fig_normalized.options());
 	auto grad_output_gate_normalized = at::empty({ batch_size * 2, state_size }, grad_gates_raw.options());
 	auto grad_new_cell_normalized = at::empty({ batch_size * 2, state_size }, grad_cell.options());
 	auto grad_fig_gate_normalized = at::empty({ batch_size * 2, 3, state_size }, grad_gates_raw.options());
@@ -970,13 +966,18 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 			dropout_output.data<scalar_t>(),
 			dropout_candidate_cell.data<scalar_t>(),
 			cells.data<scalar_t>(),
-			gates_fig.data<scalar_t>(),
-			gates_o.data<scalar_t>(),
+			gates_fig_normalized.data<scalar_t>(),
+			gates_o_normalized.data<scalar_t>(),
+			bias.data<scalar_t>(),
+			gamma_f.data<scalar_t>(),
+			gamma_i.data<scalar_t>(),
+			gamma_g.data<scalar_t>(),
+			gamma_o.data<scalar_t>(),
+			forget_gates.data<scalar_t>(),
 			grad_gates_layer_normalized.data<scalar_t>(),
 			gates_fig_stds.data<scalar_t>(),
 			gates_o_stds.data<scalar_t>(),
 			new_cells_stds.data<scalar_t>(),
-			tanh_new_cells.data<scalar_t>(),
 			grad_new_cells_wrt_tanh_new_cell.data<scalar_t>(),
 			n_total_batches,
 			state_size,
