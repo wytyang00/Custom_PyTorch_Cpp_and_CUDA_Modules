@@ -1,8 +1,6 @@
 #include <torch/extension.h>
 #include <vector>
 
-#include <pybind11/pybind11.h>
-
 std::vector<at::Tensor> ln_peephole_lstm_layer_forward(
 	at::Tensor input,
 	at::Tensor weight_ih,
@@ -32,7 +30,7 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_forward(
 	const auto gate_size = state_size_3 + state_size;
 	
 	const auto options = weight_ih.options();
-
+	
 	auto hiddens = at::empty({ sequence_length, batch_size, state_size }, options);
 	auto cells = at::empty({ sequence_length + 1, batch_size, state_size }, options);
 

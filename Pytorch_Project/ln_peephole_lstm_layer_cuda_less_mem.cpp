@@ -1,5 +1,7 @@
-#include <torch/torch.h>
+#include <torch/extension.h>
 #include <vector>
+
+#include <pybind11/pybind11.h>
 
 std::vector<at::Tensor> ln_peephole_lstm_layer_cpu_forward(
 	at::Tensor const &input,
@@ -89,6 +91,8 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cpu_forward(
 		current_gate.slice(1, 0, 2).sigmoid_();
 		current_gate.select(1, 2).tanh_();
 		current_gate.select(1, 2) *= dropout_candidate_cell[i];
+		//AT_ASSERTM(i != sequence_length - 1, "\n\n",
+		//		   current_gate, "\n\n");
 
 		hc.slice(1, state_size) = at::addcmul(hc.slice(1, state_size) * current_gate.select(1, 0), current_gate.select(1, 1), current_gate.select(1, 2));
 		hc.slice(1, state_size) -= hc.slice(1, state_size).mean(/*dim=*/1, /*keepdim=*/true);
@@ -115,6 +119,8 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cpu_forward(
 
 	// Output Dropout
 	outputs *= dropout_output;
+	//AT_ASSERTM(false, "\n\n",
+	//		   outputs, "\n\n");
 
 	return { outputs,
 		hc.slice(1, 0, state_size).contiguous(),
@@ -146,21 +152,21 @@ void backward_preparation(
 	at::Tensor &grad_new_cells_wrt_tanh_cells,
 	int64_t const &state_size)
 {
-	auto gates = at::cat({ gates_o_normalized.unsqueeze(2), gates_fig_normalized }, 2)
-		* at::stack({ gamma_o, gamma_f, gamma_i, gamma_g })
-		+ bias.view({ 4, state_size });
+	auto gates = at::addcmul(at::cat({ bias.view({ 4, state_size }).slice(0, 3), bias.view({ 4, state_size }).slice(0, 0, 3) }),
+							 at::cat({ gates_o_normalized.unsqueeze(2), gates_fig_normalized }, 2),
+							 at::stack({ gamma_o, gamma_f, gamma_i, gamma_g }));
 	gates.slice(2, 0, 3).sigmoid_();
 	gates.select(2, 3).tanh_();
 
 	forget_gates = gates.select(2, 1);
 
-	const auto tanh_cells = cells.tanh();
+	const auto tanh_cells = cells.slice(0, 1).tanh();
 	grad_new_cells_wrt_tanh_cells = (1 - tanh_cells.pow(2)) * gates.select(2, 0);
 
 	const auto d_sig = gates.slice(2, 0, 3) * (1 - gates.slice(2, 0, 3));
-	gates.slice(2, 2) *= dropout_candidate_cells;
+	gates.slice(2, 2) *= dropout_candidate_cells.unsqueeze(2);
 
-	grad_gates_layer_normalized = at::stack({ cells, gates.select(2, 3), gates.select(2, 2), tanh_cells })
+	grad_gates_layer_normalized = at::stack({ cells.slice(0, 0, -1), gates.select(2, 3), gates.select(2, 2), tanh_cells }, 2)
 		* at::cat({ d_sig.slice(2, 1, 3), (1 - gates.slice(2, 3).pow(2)), d_sig.slice(2, 0, 1) }, 2);
 }
 
@@ -220,7 +226,7 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cpu_backward(
 	backward_preparation(
 		gates_fig_normalized,
 		gates_o_normalized,
-		cells.slice(0, 0, sequence_length),
+		cells,
 		dropout_candidate_cells,
 		gamma_f,
 		gamma_i,

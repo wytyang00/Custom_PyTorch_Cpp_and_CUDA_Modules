@@ -9,6 +9,8 @@ Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
 		Debug|x86 = Debug|x86
+		Pytorch1.0_Project|x64 = Pytorch1.0_Project|x64
+		Pytorch1.0_Project|x86 = Pytorch1.0_Project|x86
 		Release|x64 = Release|x64
 		Release|x86 = Release|x86
 	EndGlobalSection
@@ -17,6 +19,10 @@ Global
 		{56ED4259-0B13-4061-ADD1-4E76C40180B3}.Debug|x64.Build.0 = Debug|x64
 		{56ED4259-0B13-4061-ADD1-4E76C40180B3}.Debug|x86.ActiveCfg = Debug|Win32
 		{56ED4259-0B13-4061-ADD1-4E76C40180B3}.Debug|x86.Build.0 = Debug|Win32
+		{56ED4259-0B13-4061-ADD1-4E76C40180B3}.Pytorch1.0_Project|x64.ActiveCfg = Pytorch1.0_Project|x64
+		{56ED4259-0B13-4061-ADD1-4E76C40180B3}.Pytorch1.0_Project|x64.Build.0 = Pytorch1.0_Project|x64
+		{56ED4259-0B13-4061-ADD1-4E76C40180B3}.Pytorch1.0_Project|x86.ActiveCfg = Pytorch1.0_Project|Win32
+		{56ED4259-0B13-4061-ADD1-4E76C40180B3}.Pytorch1.0_Project|x86.Build.0 = Pytorch1.0_Project|Win32
 		{56ED4259-0B13-4061-ADD1-4E76C40180B3}.Release|x64.ActiveCfg = Release|x64
 		{56ED4259-0B13-4061-ADD1-4E76C40180B3}.Release|x64.Build.0 = Release|x64
 		{56ED4259-0B13-4061-ADD1-4E76C40180B3}.Release|x86.ActiveCfg = Release|Win32

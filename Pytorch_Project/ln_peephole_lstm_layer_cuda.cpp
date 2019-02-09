@@ -1,5 +1,7 @@
-#include <torch/torch.h>
+#include <torch/extension.h>
 #include <vector>
+
+#include <pybind11/pybind11.h>
 
 std::vector<at::Tensor> ln_peephole_lstm_layer_cpu_forward(
 	at::Tensor const &input,

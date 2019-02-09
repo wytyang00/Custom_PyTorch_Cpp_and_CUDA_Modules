@@ -17,7 +17,21 @@ __device__ __forceinline__ scalar_t tanh(scalar_t const &z)
 	const auto exp_n2z = exp(-2 * z);
 	return (1.0 - exp_n2z) / (1.0 + exp_n2z);
 }
+/*
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t d_sigmoid(scalar_t const &z)
+{
+	const auto exp_nz = exp(-z);
+	return exp_nz / pow((1.0 + exp_nz), 2);
+}
 
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t d_tanh(scalar_t const &z)
+{
+	const auto exp_n2z = exp(-2 * z);
+	return 4 * exp_n2z / pow((1.0 + exp_n2z), 2);
+}
+*/
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t d_sigmoid_with_output(scalar_t const &a)
 {
@@ -273,8 +287,6 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_forward(
 
 	const auto ih = at::matmul(input, weight_ih.t());
 
-	hidden = hidden.clone();
-	cell = cell.clone();
 	auto hc = at::cat({ hidden, cell }, 1);
 	const auto weight_hc_h = at::cat({ weight_hh.t(),
 									   at::cat({ weight_ch.slice(0, 0, state_size).diag(),
@@ -408,28 +420,17 @@ __global__ void backward_preparation(
 	const scalar_t* __restrict__ cells,
 	const scalar_t* __restrict__ gates_fig,
 	const scalar_t* __restrict__ gates_o,
-	const scalar_t* __restrict__ gates_fig_normalized,
-	const scalar_t* __restrict__ gates_o_normalized,
-	const scalar_t* __restrict__ new_cells_normalized,
 	scalar_t* __restrict__ grad_gates_layer_normalized,
 	scalar_t* __restrict__ gates_fig_stds,
 	scalar_t* __restrict__ gates_o_stds,
 	scalar_t* __restrict__ new_cells_stds,
 	const scalar_t* __restrict__ tanh_new_cells,
 	scalar_t* __restrict__ grad_new_cells_wrt_tanh_new_cell,
-	scalar_t* __restrict__ sum_to_get_grads,
 	const int64_t n_total_batches,
-	const int64_t batch_size,
 	const int64_t state_size,
 	const int64_t state_size_2,
 	const int64_t state_size_3,
-	const int64_t gate_size,
-	const int64_t state_size_7,
-	const int64_t state_size_8,
-	const int64_t state_size_9,
-	const int64_t state_size_10,
-	const int64_t state_size_11,
-	const int64_t state_size_13)
+	const int64_t gate_size)
 {
 	const int column = blockIdx.x * blockDim.x + threadIdx.x;
 	if (column < state_size)
@@ -442,11 +443,9 @@ __global__ void backward_preparation(
 			{
 				if (process_idx == 0)
 				{
-					const int forget_index = batch * state_size_3 + column;
 					grad_gates_layer_normalized[batch * gate_size + column]
 						= cells[batch * state_size + column]
-						* d_sigmoid_with_output(gates_fig[forget_index]);
-					sum_to_get_grads[batch * state_size_13 + state_size_7 + column] = gates_fig_normalized[forget_index];
+						* d_sigmoid_with_output(gates_fig[batch * state_size_3 + column]);
 					if (column == 0)
 					{
 						gates_fig_stds[batch * 3] *= state_size;
@@ -461,7 +460,6 @@ __global__ void backward_preparation(
 					grad_gates_layer_normalized[store_idx] = gates_fig[candidate_cell_idx]
 						                                     * d_sigmoid_with_output(gates_fig[input_gate_idx])
 						                                     * dropout_candidate_cell[dropout_idx];
-					sum_to_get_grads[batch * state_size_13 + state_size_8 + column] = gates_fig_normalized[input_gate_idx];
 					if (column == 0)
 					{
 						gates_fig_stds[batch * 3 + 1] *= state_size;
@@ -476,7 +474,6 @@ __global__ void backward_preparation(
 					grad_gates_layer_normalized[store_idx] = gates_fig[input_gate_idx]
 						                                     * d_tanh_with_output(gates_fig[candidate_cell_idx])
 						                                     * dropout_candidate_cell[dropout_idx];
-					sum_to_get_grads[batch * state_size_13 + state_size_9 + column] = gates_fig_normalized[candidate_cell_idx];
 					if (column == 0)
 					{
 						gates_fig_stds[batch * 3 + 2] *= state_size;
@@ -488,7 +485,6 @@ __global__ void backward_preparation(
 					grad_gates_layer_normalized[batch * gate_size + column + state_size_3]
 						= tanh_new_cells[tanh_and_output_idx]
 						* d_sigmoid_with_output(gates_o[tanh_and_output_idx]);
-					sum_to_get_grads[batch * state_size_13 + state_size_10 + column] = gates_o_normalized[tanh_and_output_idx];
 					if (column == 0)
 					{
 						gates_o_stds[batch] *= state_size;
@@ -498,7 +494,6 @@ __global__ void backward_preparation(
 				{
 					const int index = batch * state_size + column;
 					grad_output[index] *= dropout_output[index];
-					sum_to_get_grads[batch * state_size_13 + state_size_11 + column] = new_cells_normalized[index];
 					if (column == 0)
 					{
 						new_cells_stds[batch] *= state_size;
@@ -508,11 +503,6 @@ __global__ void backward_preparation(
 				{
 					const int index = batch * state_size + column;
 					grad_new_cells_wrt_tanh_new_cell[index] = d_tanh_with_output(tanh_new_cells[index]) * gates_o[index];
-					const int base_index = batch * state_size_13 + column;
-					sum_to_get_grads[base_index + state_size_2] = cells[index + batch_size * state_size];
-					const scalar_t cell_val = cells[index];
-					sum_to_get_grads[base_index] = cell_val;
-					sum_to_get_grads[base_index + state_size] = cell_val;
 				}}}}}}
 			}
 		}
@@ -524,17 +514,13 @@ __global__ void backward_loop_part_0(
 	const scalar_t* __restrict__ grad_hidden,
 	scalar_t* __restrict__ grad_new_cell_wrt_tanh_new_cell,
 	const scalar_t* __restrict__ grad_output,
-	const scalar_t* __restrict__ grad_gate_layer_normalized,
+	scalar_t* __restrict__ grad_gate_layer_normalized,
 	const scalar_t* __restrict__ gamma_o,
 	scalar_t* __restrict__ grad_output_gate_normalized,
 	const scalar_t* __restrict__ output_gate_normalized,
-	scalar_t* __restrict__ sum_to_get_grads_slice,
 	const int64_t batch_size,
 	const int64_t state_size,
-	const int64_t state_size_3,
-	const int64_t gate_size,
-	const int64_t state_size_6,
-	const int64_t state_size_13)
+	const int64_t state_size_3)
 {
 	const int column = blockIdx.x * blockDim.x + threadIdx.x;
 	if (column < state_size)
@@ -543,13 +529,11 @@ __global__ void backward_loop_part_0(
 		if (batch < batch_size)
 		{
 			const int local_state_idx = batch * state_size + column;
+			const int gate_idx = local_state_idx + (batch + 1) * state_size_3;
 			scalar_t grad_val = grad_hidden[local_state_idx] + grad_output[local_state_idx];
 			grad_new_cell_wrt_tanh_new_cell[local_state_idx] *= grad_val;
-			const int gate_idx = local_state_idx + (batch + 1) * state_size_3;
 			grad_val *= grad_gate_layer_normalized[gate_idx];
-			const int base_index = batch * state_size_13 + state_size_6 + column;
-			sum_to_get_grads_slice[base_index] = grad_val;
-			sum_to_get_grads_slice[base_index + gate_size] *= grad_val;
+			grad_gate_layer_normalized[gate_idx] = grad_val;
 			grad_val *= gamma_o[column];
 			grad_output_gate_normalized[local_state_idx] = grad_val;
 			grad_output_gate_normalized[batch_size * state_size + local_state_idx] = grad_val * output_gate_normalized[local_state_idx];
@@ -567,17 +551,13 @@ __global__ void backward_loop_part_1(
 	const scalar_t* __restrict__ weight_co,
 	const scalar_t* __restrict__ grad_new_cell_wrt_tanh_new_cell,
 	scalar_t* __restrict__ grad_cell,
+	scalar_t* __restrict__ grad_new_cell,
 	scalar_t* __restrict__ grad_new_cell_normalized,
 	const scalar_t* __restrict__ new_cell_normalized,
 	const scalar_t* __restrict__ gamma_new_cell,
-	scalar_t* __restrict__ sum_to_get_grads_slice,
 	const int64_t batch_size,
 	const int64_t state_size,
-	const int64_t state_size_2,
-	const int64_t state_size_3,
-	const int64_t state_size_9,
-	const int64_t state_size_10,
-	const int64_t state_size_13)
+	const int64_t state_size_3)
 {
 	const int column = blockIdx.x * blockDim.x + threadIdx.x;
 	if (column < state_size)
@@ -591,11 +571,8 @@ __global__ void backward_loop_part_1(
 								 - grad_output_gate_normalized_sums[batch]
 								 - output_gate_normalized[local_state_idx] * grad_output_gate_normalized_sums[batch_size + batch]) / output_gate_std[batch];
 			grad_gate_raw[gate_idx] = grad_val;
-			const int base_index = batch * state_size_13 + state_size_2 + column;
-			sum_to_get_grads_slice[base_index] *= grad_val;
 			grad_val = grad_val * weight_co[column] + grad_new_cell_wrt_tanh_new_cell[local_state_idx] + grad_cell[local_state_idx];
-			sum_to_get_grads_slice[base_index + state_size_9] *= grad_val;
-			sum_to_get_grads_slice[base_index + state_size_10] = grad_val;
+			grad_new_cell[local_state_idx] = grad_val;
 			grad_val *= gamma_new_cell[column];
 			grad_cell[local_state_idx] = grad_val;
 			grad_new_cell_normalized[local_state_idx] = grad_val;
@@ -630,18 +607,15 @@ __global__ void backward_loop_part_2(
 template <typename scalar_t>
 __global__ void backward_loop_part_3(
 	const scalar_t* __restrict__ grad_cell,
-	const scalar_t* __restrict__ grad_gate_layer_normalized,
+	scalar_t* __restrict__ grad_gate_layer_normalized,
 	const scalar_t* __restrict__ gamma_f,
 	const scalar_t* __restrict__ gamma_i,
 	const scalar_t* __restrict__ gamma_g,
 	scalar_t* __restrict__ grad_fig_gate_normalized,
 	const scalar_t* __restrict__ fig_gate_normalized,
-	scalar_t* __restrict__ sum_to_get_grads_slice,
 	const int64_t batch_size,
 	const int64_t state_size,
-	const int64_t state_size_3,
-	const int64_t gate_size,
-	const int64_t state_size_8)
+	const int64_t state_size_3)
 {
 	const int column = blockIdx.x * blockDim.x + threadIdx.x;
 	if (column < state_size)
@@ -656,10 +630,7 @@ __global__ void backward_loop_part_3(
 				const int fig_idx = batch * state_size_3 + process_idx * state_size + column;
 				const int gate_idx = fig_idx + batch * state_size;
 				scalar_t grad_val = grad_cell[local_state_idx] * grad_gate_layer_normalized[gate_idx];
-				const int base_index = fig_idx + batch * state_size_8 + state_size_3;
-				sum_to_get_grads_slice[base_index] = grad_val;
-				sum_to_get_grads_slice[base_index + gate_size] *= grad_val;
-				//grad_val *= { gamma_f, gamma_i, gamma_g }[process_idx][column];
+				grad_gate_layer_normalized[gate_idx] = grad_val;
 				if (process_idx == 0)
 				{
 					grad_val *= gamma_f[column];
@@ -686,11 +657,9 @@ __global__ void backward_loop_part_4(
 	const scalar_t* __restrict__ gate_fig_normalized,
 	const scalar_t* __restrict__ gate_fig_std,
 	scalar_t* __restrict__ grad_gate_raw,
-	scalar_t* __restrict__ sum_to_get_grads_slice,
 	const int64_t batch_size,
 	const int64_t state_size,
-	const int64_t state_size_3,
-	const int64_t state_size_10)
+	const int64_t state_size_3)
 {
 	const int column = blockIdx.x * blockDim.x + threadIdx.x;
 	if (column < state_size)
@@ -707,10 +676,6 @@ __global__ void backward_loop_part_4(
 									 - grad_fig_gate_normalized_sums[reduced_fig_idx]
 									 - gate_fig_normalized[fig_idx] * grad_fig_gate_normalized_sums[batch_size * 3 + reduced_fig_idx]) / gate_fig_std[reduced_fig_idx];
 				grad_gate_raw[fig_idx + batch * state_size] = grad_val;
-				if (process_idx != 2)
-				{
-					sum_to_get_grads_slice[fig_idx + batch * state_size_10] *= grad_val;
-				}
 			}
 		}
 	}
@@ -753,6 +718,175 @@ __global__ void backward_loop_part_5(
 	}
 }
 
+template <typename scalar_t>
+__global__ void backward_final(
+	scalar_t* __restrict__ sum_to_get_grads,
+	const scalar_t* __restrict__ grad_gates_raw,
+	const scalar_t* __restrict__ cells,
+	const scalar_t* __restrict__ grad_gates_layer_normalized,
+	const scalar_t* __restrict__ gates_fig_normalized,
+	const scalar_t* __restrict__ gates_o_normalized,
+	const scalar_t* __restrict__ grad_new_cells,
+	const scalar_t* __restrict__ new_cells_normalized,
+	const int64_t n_total_batches,
+	const int64_t batch_size,
+	const int64_t state_size,
+	const int64_t state_size_2,
+	const int64_t state_size_3,
+	const int64_t gate_size)
+{
+	const int column = blockIdx.x * blockDim.x + threadIdx.x;
+	if (column < state_size)
+	{
+		const int batch = blockIdx.y * blockDim.y + threadIdx.y;
+		if (batch < n_total_batches)
+		{
+			const int process_idx = blockIdx.z;
+			if (process_idx < 13)
+			{
+				const int store_idx = batch * (gate_size * 3 + state_size) + process_idx * state_size + column;
+				/*if (process_idx == 0)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_raw[batch * gate_size + column] * cells[batch * state_size + column];
+				}
+				else{
+				if (process_idx == 1)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_raw[batch * gate_size + column + state_size] * cells[batch * state_size + column];
+				}
+				else{
+				if (process_idx == 2)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_raw[batch * gate_size + column + state_size_3] * cells[(batch + batch_size) * state_size + column];
+				}
+				else{
+				if (process_idx == 3)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column];
+				}
+				else{
+				if (process_idx == 4)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column + state_size];
+				}
+				else{
+				if (process_idx == 5)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column + state_size_2];
+				}
+				else{
+				if (process_idx == 6)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column + state_size_3];
+				}
+				else{
+				if (process_idx == 7)
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column] * gates_fig_normalized[batch * state_size_3 + column];
+				}
+				else{
+				if (process_idx == 8)
+				{
+					const int norm_idx = batch * state_size_3 + column + state_size;
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[norm_idx + batch * state_size] * gates_fig_normalized[norm_idx];
+				}
+				else{
+				if (process_idx == 9)
+				{
+					const int norm_idx = batch * state_size_3 + column + state_size_2;
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[norm_idx + batch * state_size] * gates_fig_normalized[norm_idx];
+				}
+				else{
+				if (process_idx == 10)
+				{
+					const int norm_idx = batch * state_size + column;
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[norm_idx + (batch + 1) * state_size_3] * gates_o_normalized[norm_idx];
+				}
+				else{
+				if (process_idx == 11)
+				{
+					sum_to_get_grads[store_idx] = grad_new_cells[batch * state_size + column] * new_cells_normalized[batch * state_size + column];
+				}
+				else
+				{
+					sum_to_get_grads[store_idx] = grad_new_cells[batch * state_size + column];
+				}}}}}}}}}}}}*/
+				switch (process_idx)
+				{
+				case 0:
+				{
+					sum_to_get_grads[store_idx] = grad_gates_raw[batch * gate_size + column] * cells[batch * state_size + column];
+					break;
+				}
+				case 1:
+				{
+					sum_to_get_grads[store_idx] = grad_gates_raw[batch * gate_size + column + state_size] * cells[batch * state_size + column];
+					break;
+				}
+				case 2:
+				{
+					sum_to_get_grads[store_idx] = grad_gates_raw[batch * gate_size + column + state_size_3] * cells[(batch + batch_size) * state_size + column];
+					break;
+				}
+				case 3:
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column];
+					break;
+				}
+				case 4:
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column + state_size];
+					break;
+				}
+				case 5:
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column + state_size_2];
+					break;
+				}
+				case 6:
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column + state_size_3];
+					break;
+				}
+				case 7:
+				{
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[batch * gate_size + column] * gates_fig_normalized[batch * state_size_3 + column];
+					break;
+				}
+				case 8:
+				{
+					const int norm_idx = batch * state_size_3 + column + state_size;
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[norm_idx + batch * state_size] * gates_fig_normalized[norm_idx];
+					break;
+				}
+				case 9:
+				{
+					const int norm_idx = batch * state_size_3 + column + state_size_2;
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[norm_idx + batch * state_size] * gates_fig_normalized[norm_idx];
+					break;
+				}
+				case 10:
+				{
+					const int norm_idx = batch * state_size + column;
+					sum_to_get_grads[store_idx] = grad_gates_layer_normalized[norm_idx + (batch + 1) * state_size_3] * gates_o_normalized[norm_idx];
+					break;
+				}
+				case 11:
+				{
+					sum_to_get_grads[store_idx] = grad_new_cells[batch * state_size + column] * new_cells_normalized[batch * state_size + column];
+					break;
+				}
+				case 12:
+				{
+					sum_to_get_grads[store_idx] = grad_new_cells[batch * state_size + column];
+					break;
+				}
+				}
+			}
+		}
+	}
+}
+
 std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 	at::Tensor &grad_output,
 	at::Tensor &grad_hidden,
@@ -779,10 +913,6 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 	at::Tensor const &gamma_o,
 	at::Tensor const &gamma_new_cell)
 {
-	grad_output = grad_output.clone();
-	grad_hidden = grad_hidden.clone();
-	grad_cell = grad_cell.clone();
-
 	const auto sequence_length = input.size(0);
 	const auto batch_size = input.size(1);
 	const auto state_size = hiddens.size(2);
@@ -793,15 +923,6 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 	const auto X_size = input_size + state_size_2;
 
 	const auto n_total_batches = batch_size * sequence_length;
-	const auto state_size_5 = gate_size + state_size;
-	const auto state_size_6 = gate_size + state_size_2;
-	const auto state_size_7 = gate_size + state_size_3;
-	const auto state_size_8 = gate_size + gate_size;
-	const auto state_size_9 = state_size_8 + state_size;
-	const auto state_size_10 = state_size_8 + state_size_2;
-	const auto state_size_11 = state_size_8 + state_size_3;
-	const auto state_size_12 = state_size_8 + gate_size;
-	const auto state_size_13 = state_size_12 + state_size;
 
 	const auto dropout_candidate_cell = dropout[0];
 	const auto dropout_output = dropout[1];
@@ -819,13 +940,14 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 
 	auto grad_gates_layer_normalized = at::empty({ sequence_length, batch_size, gate_size }, gates_fig.options());
 	auto grad_gates_raw = at::empty_like(grad_gates_layer_normalized);
+	auto grad_new_cells = at::empty_like(tanh_new_cells);
 	auto grad_new_cells_wrt_tanh_new_cell = at::empty_like(tanh_new_cells);
 
 	auto grad_output_gate_normalized = at::empty({ batch_size * 2, state_size }, grad_gates_raw.options());
 	auto grad_new_cell_normalized = at::empty({ batch_size * 2, state_size }, grad_cell.options());
 	auto grad_fig_gate_normalized = at::empty({ batch_size * 2, 3, state_size }, grad_gates_raw.options());
 
-	auto sum_to_get_grads = at::empty({ sequence_length, batch_size, state_size_13 }, weights.options());
+	at::Tensor sum_to_get_grads;
 
 	const dim3 threads(64, 8);
 	const dim3 blocks_0((state_size + threads.x - 1) / threads.x,
@@ -838,6 +960,9 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 						3);
 	const dim3 blocks_3((X_size + threads.x - 1) / threads.x,
 						(batch_size + threads.y - 1) / threads.y);
+	const dim3 blocks_4((state_size + threads.x - 1) / threads.x,
+						(n_total_batches + threads.y - 1) / threads.y,
+						13);
 
 	AT_DISPATCH_FLOATING_TYPES(gates_fig.type(), "ln_peephole_lstm_layer_cuda_backward", ([&] {
 		backward_preparation<scalar_t> <<<blocks_0, threads>>> (
@@ -847,28 +972,17 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 			cells.data<scalar_t>(),
 			gates_fig.data<scalar_t>(),
 			gates_o.data<scalar_t>(),
-			gates_fig_normalized.data<scalar_t>(),
-			gates_o_normalized.data<scalar_t>(),
-			new_cells_normalized.data<scalar_t>(),
 			grad_gates_layer_normalized.data<scalar_t>(),
 			gates_fig_stds.data<scalar_t>(),
 			gates_o_stds.data<scalar_t>(),
 			new_cells_stds.data<scalar_t>(),
 			tanh_new_cells.data<scalar_t>(),
 			grad_new_cells_wrt_tanh_new_cell.data<scalar_t>(),
-			sum_to_get_grads.data<scalar_t>(),
 			n_total_batches,
-			batch_size,
 			state_size,
 			state_size_2,
 			state_size_3,
-			gate_size,
-			state_size_7,
-			state_size_8,
-			state_size_9,
-			state_size_10,
-			state_size_11,
-			state_size_13);
+			gate_size);
 
 		for (int i = sequence_length - 1; i >= 0; i--)
 		{
@@ -880,13 +994,9 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 				gamma_o.data<scalar_t>(),
 				grad_output_gate_normalized.data<scalar_t>(),
 				gates_o_normalized[i].data<scalar_t>(),
-				sum_to_get_grads[i].data<scalar_t>(),
 				batch_size,
 				state_size,
-				state_size_3,
-				gate_size,
-				state_size_6,
-				state_size_13);
+				state_size_3);
 
 			backward_loop_part_1<scalar_t> <<<blocks_1, threads>>> (
 				grad_output_gate_normalized.data<scalar_t>(),
@@ -897,17 +1007,13 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 				weight_co.data<scalar_t>(),
 				grad_new_cells_wrt_tanh_new_cell[i].data<scalar_t>(),
 				grad_cell.data<scalar_t>(),
+				grad_new_cells[i].data<scalar_t>(),
 				grad_new_cell_normalized.data<scalar_t>(),
 				new_cells_normalized[i].data<scalar_t>(),
 				gamma_new_cell.data<scalar_t>(),
-				sum_to_get_grads[i].data<scalar_t>(),
 				batch_size,
 				state_size,
-				state_size_2,
-				state_size_3,
-				state_size_9,
-				state_size_10,
-				state_size_13);
+				state_size_3);
 
 			backward_loop_part_2<scalar_t> <<<blocks_1, threads>>> (
 				grad_cell.data<scalar_t>(),
@@ -925,12 +1031,9 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 				gamma_g.data<scalar_t>(),
 				grad_fig_gate_normalized.data<scalar_t>(),
 				gates_fig_normalized[i].data<scalar_t>(),
-				sum_to_get_grads[i].data<scalar_t>(),
 				batch_size,
 				state_size,
-				state_size_3,
-				gate_size,
-				state_size_8);
+				state_size_3);
 
 			backward_loop_part_4<scalar_t> <<<blocks_2, threads>>> (
 				grad_fig_gate_normalized.data<scalar_t>(),
@@ -938,11 +1041,9 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 				gates_fig_normalized[i].data<scalar_t>(),
 				gates_fig_stds[i].data<scalar_t>(),
 				grad_gates_raw[i].data<scalar_t>(),
-				sum_to_get_grads[i].data<scalar_t>(),
 				batch_size,
 				state_size,
-				state_size_3,
-				state_size_10);
+				state_size_3);
 
 			backward_loop_part_5<scalar_t> <<<blocks_3, threads>>> (
 				grad_gates_raw[i].mm(weights).data<scalar_t>(),
@@ -956,10 +1057,26 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 				state_size_2,
 				X_size);
 		}
+		sum_to_get_grads = at::empty({ sequence_length * batch_size, gate_size * 3 + state_size }, weights.options());
+		backward_final<scalar_t> <<<blocks_4, threads>>> (
+			sum_to_get_grads.data<scalar_t>(),
+			grad_gates_raw.data<scalar_t>(),
+			cells.data<scalar_t>(),
+			grad_gates_layer_normalized.data<scalar_t>(),
+			gates_fig_normalized.data<scalar_t>(),
+			gates_o_normalized.data<scalar_t>(),
+			grad_new_cells.data<scalar_t>(),
+			new_cells_normalized.data<scalar_t>(),
+			n_total_batches,
+			batch_size,
+			state_size,
+			state_size_2,
+			state_size_3,
+			gate_size);
 	}));
 	const auto grad_weight_ih_hh = grad_gates_raw.view({ sequence_length * batch_size, gate_size }).t().mm(at::cat({ input, hiddens }, 2).view({ sequence_length * batch_size, input_size + state_size }));
 
-	const auto bunch_of_grads = sum_to_get_grads.sum(/*dim=*/{ 0, 1 }, /*keepdim=*/false);
+	const auto bunch_of_grads = sum_to_get_grads.sum(/*dim=*/0, /*keepdim=*/false);
 
 	return { grad_input,
 			 grad_weight_ih_hh.slice(1, 0, input_size).contiguous(),

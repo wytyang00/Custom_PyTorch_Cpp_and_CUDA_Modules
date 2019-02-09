@@ -31,7 +31,7 @@ __device__ __forceinline__ scalar_t d_tanh(scalar_t const &z)
 	const auto exp_n2z = exp(-2 * z);
 	return 4 * exp_n2z / pow((1.0 + exp_n2z), 2);
 }
-/*
+
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t d_sigmoid_with_output(scalar_t const &a)
 {
@@ -43,7 +43,7 @@ __device__ __forceinline__ scalar_t d_tanh_with_output(scalar_t const &a)
 {
 	return 1.0 - (a * a);
 }
-*/
+
 template <typename scalar_t>
 __global__ void forward_part_0(
 	const scalar_t* __restrict__ hidden,
@@ -324,7 +324,6 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_forward(
 				gates_fig_normalized[i].data<scalar_t>(),
 				gamma_fig.data<scalar_t>(),
 				bias_fig.data<scalar_t>(),
-				gates_fig[i].data<scalar_t>(),
 				forgotten_cell.data<scalar_t>(),
 				dropout_candidate_cell[i].data<scalar_t>(),
 				batch_size,
@@ -370,9 +369,7 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_forward(
 				gates_o_normalized[i].data<scalar_t>(),
 				gamma_o.data<scalar_t>(),
 				bias_o.data<scalar_t>(),
-				gates_o[i].data<scalar_t>(),
 				cell.data<scalar_t>(),
-				tanh_new_cells[i].data<scalar_t>(),
 				hidden.data<scalar_t>(),
 				hc.data<scalar_t>(),
 				outputs[i].data<scalar_t>(),
@@ -501,7 +498,7 @@ __global__ void backward_preparation(
 				else{if (process_idx == 5)
 				{
 					const int index = batch * state_size + column;
-					grad_new_cells_wrt_tanh_new_cell[index] = d_tanh(cells[cell_and_output_idx]) * sigmoid(gates_o_normalized[index] * gamma_o[column] + bias[column + state_size_3]);
+					grad_new_cells_wrt_tanh_new_cell[index] = d_tanh(cells[index]) * sigmoid(gates_o_normalized[index] * gamma_o[column] + bias[column + state_size_3]);
 				}}}}}}
 			}
 		}
@@ -960,7 +957,7 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 						(n_total_batches + threads.y - 1) / threads.y,
 						13);
 
-	AT_DISPATCH_FLOATING_TYPES(gates_fig.type(), "ln_peephole_lstm_layer_cuda_backward", ([&] {
+	AT_DISPATCH_FLOATING_TYPES(gates_fig_normalized.type(), "ln_peephole_lstm_layer_cuda_backward", ([&] {
 		backward_preparation<scalar_t> <<<blocks_0, threads>>> (
 			grad_output.data<scalar_t>(),
 			dropout_output.data<scalar_t>(),
