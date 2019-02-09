@@ -252,16 +252,12 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_forward(
 
 	auto gates_fig_stds = at::empty({ sequence_length, batch_size, 3, 1 }, options);
 	auto gates_fig_normalized = at::empty({ sequence_length, batch_size, 3, state_size }, options);
-	auto gates_fig = at::empty({ sequence_length, batch_size, 3, state_size }, options);
 
 	auto gates_o_stds = at::empty({ sequence_length, batch_size, 1 }, options);
 	auto gates_o_normalized = at::empty({ sequence_length, batch_size, state_size }, options);
-	auto gates_o = at::empty({ sequence_length, batch_size, state_size }, options);
 
 	auto new_cells_stds = at::empty({ sequence_length, batch_size, 1 }, options);
 	auto new_cells_normalized = at::empty({ sequence_length, batch_size, state_size }, options);
-
-	auto tanh_new_cells = at::empty({ sequence_length, batch_size, state_size }, options);
 
 	auto outputs = at::empty({ sequence_length, batch_size, state_size }, options);
 
@@ -279,6 +275,8 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_forward(
 
 	const auto ih = at::matmul(input, weight_ih.t());
 
+	hidden = hidden.clone();
+	cell = cell.clone();
 	auto hc = at::cat({ hidden, cell }, 1);
 	const auto weight_hc_h = at::cat({ weight_hh.t(),
 									   at::cat({ weight_ch.slice(0, 0, state_size).diag(),
@@ -387,15 +385,12 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_forward(
 		input,
 		hiddens,
 		cells,
-		gates_fig,
 		gates_fig_normalized,
 		gates_fig_stds,
-		gates_o,
 		gates_o_normalized,
 		gates_o_stds,
 		new_cells_normalized,
 		new_cells_stds,
-		tanh_new_cells,
 		dropout };
 }
 
@@ -421,6 +416,7 @@ __global__ void backward_preparation(
 	scalar_t* __restrict__ new_cells_stds,
 	scalar_t* __restrict__ grad_new_cells_wrt_tanh_new_cell,
 	const int64_t n_total_batches,
+	const int64_t batch_times_state,
 	const int64_t state_size,
 	const int64_t state_size_2,
 	const int64_t state_size_3,
@@ -477,10 +473,10 @@ __global__ void backward_preparation(
 				}
 				else{if (process_idx == 3)
 				{
-					const int cell_and_output_idx = batch * state_size + column;
-					grad_gates_layer_normalized[batch * gate_size + column + state_size_3]
-						= tanh(cells[cell_and_output_idx])
-						* d_sigmoid(gates_o_normalized[cell_and_output_idx] * gamma_o[column] + bias[column + state_size_3]);
+					const int output_idx = batch * state_size + column;
+					grad_gates_layer_normalized[output_idx + (batch + 1) * state_size_3]
+						= tanh(cells[output_idx + batch_times_state])
+						* d_sigmoid(gates_o_normalized[output_idx] * gamma_o[column] + bias[column + state_size_3]);
 					if (column == 0)
 					{
 						gates_o_stds[batch] *= state_size;
@@ -498,7 +494,7 @@ __global__ void backward_preparation(
 				else{if (process_idx == 5)
 				{
 					const int index = batch * state_size + column;
-					grad_new_cells_wrt_tanh_new_cell[index] = d_tanh(cells[index]) * sigmoid(gates_o_normalized[index] * gamma_o[column] + bias[column + state_size_3]);
+					grad_new_cells_wrt_tanh_new_cell[index] = d_tanh(cells[index + batch_times_state]) * sigmoid(gates_o_normalized[index] * gamma_o[column] + bias[column + state_size_3]);
 				}}}}}}
 			}
 		}
@@ -907,6 +903,10 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 	at::Tensor const &gamma_o,
 	at::Tensor const &gamma_new_cell)
 {
+	grad_output = grad_output.clone();
+	grad_hidden = grad_hidden.clone();
+	grad_cell = grad_cell.clone();
+
 	const auto sequence_length = input.size(0);
 	const auto batch_size = input.size(1);
 	const auto state_size = hiddens.size(2);
@@ -917,6 +917,7 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 	const auto X_size = input_size + state_size_2;
 
 	const auto n_total_batches = batch_size * sequence_length;
+	const auto batch_times_state = batch_size * state_size;
 
 	const auto dropout_candidate_cell = dropout[0];
 	const auto dropout_output = dropout[1];
@@ -977,10 +978,16 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_cuda_backward(
 			new_cells_stds.data<scalar_t>(),
 			grad_new_cells_wrt_tanh_new_cell.data<scalar_t>(),
 			n_total_batches,
+			batch_times_state,
 			state_size,
 			state_size_2,
 			state_size_3,
 			gate_size);
+		/*AT_ASSERTM(false, "\n\n",
+				   "grad_output\n", grad_output, "\n\n",
+				   "forget_gates\n", forget_gates, "\n\n",
+				   "grad_gates_layer_normalized\n", grad_gates_layer_normalized, "\n\n",
+				   "grad_new_cells_wrt_tanh_new_cell\n", grad_new_cells_wrt_tanh_new_cell, "\n\n");*/
 
 		for (int i = sequence_length - 1; i >= 0; i--)
 		{

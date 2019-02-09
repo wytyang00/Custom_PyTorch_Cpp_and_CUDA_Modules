@@ -407,7 +407,7 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_forward(
 			   && (use_cuda == gamma_new_cell.is_cuda()) && (use_cuda == beta_new_cell.is_cuda()) && (use_cuda == hidden.is_cuda()) && (use_cuda == cell.is_cuda()),
 			   "### All tensors must be located in either CPU or CUDA devices together, but some of the given tensors are in a different device ###");
 
-	if (false)
+	if (use_cuda)
 	{
 		// Contiguity check (IMPORTANT FOR CUDA OPERATIONS; non-contiguous tensors result in irregular indexing and, therefore, calculation errors)
 		AT_ASSERTM(input.is_contiguous(), "### input tensor is not contiguous ###");
@@ -474,7 +474,7 @@ std::vector<at::Tensor> ln_peephole_lstm_layer_backward(
 			   && (use_cuda == gamma_f.is_cuda()) && (use_cuda == gamma_i.is_cuda()) && (use_cuda == gamma_g.is_cuda()) && (use_cuda == gamma_o.is_cuda()) && (use_cuda == gamma_new_cell.is_cuda()),
 			   "### All tensors must be located in either CPU or CUDA devices together, but some of the given tensors are in a different device ###");
 
-	if (false)
+	if (use_cuda)
 	{
 		// Contiguity check
 		AT_ASSERTM(grad_output.is_contiguous(), "### grad_output tensor is not contiguous ###");
